@@ -1,7 +1,7 @@
 import { db, configured } from "./firebase.js";
 import { initAuth } from "./auth.js";
 import {
-  collection, addDoc, doc, getDoc, setDoc, deleteDoc, query, where, getDocs
+  collection, doc, getDoc, setDoc, updateDoc, deleteDoc, query, where, getDocs
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { computeSummary, pct, LEVELS, CHECKLIST } from "./calc.js";
 
@@ -25,6 +25,7 @@ const AREAS = [["attendance", "Attendance"], ["punctuality", "Punctuality"], ["m
 const ROLES = [["lead", "Lead monitor"], ["member", "Monitoring team member"], ["head", "Head of institution (acknowledgement)"]];
 
 let user = null, state = null, docId = null, tab = "institution";
+let profile = { role: "monitor" }, readOnly = false, dashView = "mine";
 let saveTimer = null, dirty = false;
 
 /* ---------- blank data ---------- */
@@ -87,6 +88,7 @@ const getByPath = (obj, path) => path.split(".").reduce((o, k) => o?.[k], obj);
 function setStatus(text) { const s = $("save-status"); if (s) s.textContent = text; }
 
 function scheduleSave() {
+  if (readOnly) return;
   dirty = true; setStatus("Unsaved changes…");
   clearTimeout(saveTimer);
   saveTimer = setTimeout(saveNow, 1200);
@@ -94,18 +96,53 @@ function scheduleSave() {
 
 async function saveNow() {
   clearTimeout(saveTimer);
-  if (!dirty || !state || !docId) return;
+  if (readOnly || !dirty || !state || !docId) return;
   dirty = false; setStatus("Saving…");
   try {
     state.updatedAt = Date.now();
-    await setDoc(doc(db, "inspections", docId), state);
-    setStatus("All changes saved");
+    const write = setDoc(doc(db, "inspections", docId), state);
+    if (navigator.onLine) {
+      await write;
+      setStatus("All changes saved");
+    } else {
+      // Offline: the write is stored locally and sent automatically when back online.
+      setStatus("Saved on this device. Will sync when online");
+      write.then(() => { if (!dirty) setStatus("All changes saved"); }).catch(console.error);
+    }
   } catch (err) {
     dirty = true; setStatus("Save failed");
     console.error(err); toast("Could not save: " + (err.code || err.message));
   }
 }
 window.addEventListener("beforeunload", e => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+
+/* ---------- user profile, roles, network ---------- */
+const isLead = () => profile.role === "lead";
+
+async function loadProfile() {
+  profile = { role: "monitor" };
+  try {
+    const ref = doc(db, "users", user.uid);
+    const snap = await getDoc(ref);
+    const name = user.displayName || "", email = user.email || "";
+    if (!snap.exists()) {
+      profile = { name, email, role: "monitor", createdAt: Date.now() };
+      setDoc(ref, profile).catch(e => console.warn("Could not create profile", e));
+    } else {
+      profile = snap.data();
+      if (name && profile.name !== name) {
+        profile.name = name;
+        updateDoc(ref, { name }).catch(e => console.warn("Could not update profile", e));
+      }
+    }
+  } catch (e) { console.warn("Could not load profile (are the Firestore rules published?)", e); }
+  $("user-label").textContent = user.displayName || user.email;
+  $("role-badge").classList.toggle("hidden", !isLead());
+}
+
+function updateNet() { $("offline-badge").classList.toggle("hidden", navigator.onLine); }
+window.addEventListener("online", () => { updateNet(); saveNow(); });
+window.addEventListener("offline", updateNet);
 
 /* ---------- routing ---------- */
 function route() {
@@ -115,42 +152,56 @@ function route() {
 }
 window.addEventListener("hashchange", async () => { await saveNow(); route(); });
 
-initAuth(u => {
+initAuth(async u => {
   user = u;
   $("config-warning").classList.toggle("hidden", configured);
   $("auth-view").classList.toggle("hidden", !!u);
   $("app-view").classList.toggle("hidden", !u);
-  if (u) { $("user-label").textContent = u.displayName || u.email; route(); }
-  else { state = null; docId = null; main.innerHTML = ""; }
+  updateNet();
+  if (u) { await loadProfile(); route(); }
+  else { state = null; docId = null; profile = { role: "monitor" }; dashView = "mine"; main.innerHTML = ""; }
 });
 
 /* ---------- dashboard ---------- */
 async function showDashboard() {
   await saveNow();
-  state = null; docId = null;
+  state = null; docId = null; readOnly = false;
   main.innerHTML = '<p class="muted pad">Loading…</p>';
+  const all = isLead() && dashView === "all";
   try {
-    const snap = await getDocs(query(collection(db, "inspections"), where("ownerId", "==", user.uid)));
+    const q = all
+      ? collection(db, "inspections")
+      : query(collection(db, "inspections"), where("ownerId", "==", user.uid));
+    const snap = await getDocs(q);
     const items = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+    const toggle = isLead() ? `<div class="seg inline">
+        <button class="seg-btn ${all ? "" : "active"}" data-view="mine">My checks</button>
+        <button class="seg-btn ${all ? "active" : ""}" data-view="all">All monitors</button></div>` : "";
+
+    const card = i => {
+      const own = i.ownerId === user.uid;
+      const search = [i.institution?.name, i.institution?.location, i.ownerName].join(" ").toLowerCase();
+      return `<article class="card" data-search="${esc(search)}">
+        <h3>${esc(i.institution?.name || "Untitled check")}</h3>
+        <p class="muted">${esc(i.institution?.location || "No location")}</p>
+        <p class="meta"><span>${esc(i.institution?.date || "No date")}</span>
+          ${i.institution?.type ? `<span class="pill">${esc(i.institution.type)}</span>` : ""}</p>
+        ${all ? `<p class="small">Monitor: <b>${esc(own ? "You" : (i.ownerName || "Unknown"))}</b></p>` : ""}
+        <p class="muted small">Updated ${new Date(i.updatedAt || 0).toLocaleString()}</p>
+        <div class="row-actions">
+          <a class="btn small primary" href="#/i/${i.id}">${own ? "Open" : "View"}</a>
+          ${own ? `<button class="btn small danger" data-action="delete" data-id="${i.id}">Delete</button>` : ""}
+        </div></article>`;
+    };
+
     main.innerHTML = `
       <div class="page-head">
-        <h2>My institution checks</h2>
-        <button class="btn primary" data-action="new">+ New check</button>
+        <h2>${all ? "All institution checks" : "My institution checks"}</h2>
+        <div class="head-actions">${toggle}<button class="btn primary" data-action="new">+ New check</button></div>
       </div>
-      ${items.length ? `<div class="cards">${items.map(i => `
-        <article class="card">
-          <h3>${esc(i.institution?.name || "Untitled check")}</h3>
-          <p class="muted">${esc(i.institution?.location || "No location")}</p>
-          <p class="meta">
-            <span>${esc(i.institution?.date || "No date")}</span>
-            ${i.institution?.type ? `<span class="pill">${esc(i.institution.type)}</span>` : ""}
-          </p>
-          <p class="muted small">Updated ${new Date(i.updatedAt || 0).toLocaleString()}</p>
-          <div class="row-actions">
-            <a class="btn small primary" href="#/i/${i.id}">Open</a>
-            <button class="btn small danger" data-action="delete" data-id="${i.id}">Delete</button>
-          </div>
-        </article>`).join("")}</div>`
+      ${all ? `<input id="filter" class="filter" type="search" placeholder="Filter by institution, location or monitor…">` : ""}
+      ${items.length ? `<div class="cards" id="cards">${items.map(card).join("")}</div>`
         : '<div class="empty"><p>No checks yet.</p><p class="muted">Click <b>New check</b> to record your first institution visit.</p></div>'}`;
   } catch (err) {
     console.error(err);
@@ -161,15 +212,20 @@ async function showDashboard() {
 
 async function createInspection() {
   try {
-    const ref = await addDoc(collection(db, "inspections"), newInspection());
+    const ref = doc(collection(db, "inspections"));   // id is generated locally, so this also works offline
+    const write = setDoc(ref, newInspection());
+    if (navigator.onLine) await write; else write.catch(console.error);
     location.hash = `#/i/${ref.id}`;
   } catch (err) { toast("Could not create check: " + (err.code || err.message)); }
 }
 
 async function deleteInspection(id) {
   if (!confirm("Delete this check permanently? This cannot be undone.")) return;
-  try { await deleteDoc(doc(db, "inspections", id)); toast("Deleted"); showDashboard(); }
-  catch (err) { toast("Could not delete: " + (err.code || err.message)); }
+  try {
+    const del = deleteDoc(doc(db, "inspections", id));
+    if (navigator.onLine) await del; else del.catch(console.error);
+    toast("Deleted"); showDashboard();
+  } catch (err) { toast("Could not delete: " + (err.code || err.message)); }
 }
 
 /* ---------- editor ---------- */
@@ -178,10 +234,12 @@ async function openEditor(id) {
   main.innerHTML = '<p class="muted pad">Loading…</p>';
   try {
     const snap = await getDoc(doc(db, "inspections", id));
-    if (!snap.exists() || snap.data().ownerId !== user.uid) {
+    const data = snap.exists() ? snap.data() : null;
+    if (!data || (data.ownerId !== user.uid && !isLead())) {
       main.innerHTML = '<p class="pad">Check not found. <a href="#/">Back to list</a></p>'; return;
     }
-    docId = id; state = normalise(snap.data()); dirty = false; tab = "institution";
+    docId = id; state = normalise(data); dirty = false; tab = "institution";
+    readOnly = data.ownerId !== user.uid;   // leads can view other monitors' checks but not edit them
     renderEditor();
   } catch (err) {
     main.innerHTML = `<p class="error pad">Could not open check: ${esc(err.code || err.message)} <a href="#/">Back</a></p>`;
@@ -193,9 +251,10 @@ function renderEditor() {
     <div class="editor-head">
       <a href="#/" class="btn small">← All checks</a>
       <h2 id="title">${esc(state.institution.name || "Untitled check")}</h2>
-      <span id="save-status" class="muted small">All changes saved</span>
+      <span id="save-status" class="muted small">${readOnly ? "" : "All changes saved"}</span>
       <button class="btn small" data-action="export">Export Excel</button>
     </div>
+    ${readOnly ? `<p class="banner-ro">Read-only view of a check recorded by <b>${esc(state.ownerName || "another monitor")}</b>.</p>` : ""}
     <nav class="tabs" id="tabs">${TABS.map(([k, l]) => `<button data-tab="${k}" class="${k === tab ? "active" : ""}">${l}</button>`).join("")}</nav>
     <div id="tab-body" class="panel"></div>`;
   renderTab();
@@ -203,7 +262,11 @@ function renderEditor() {
 
 function renderTab() {
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
-  $("tab-body").innerHTML = { institution: tInstitution, attendance: tAttendance, movement: tMovement, records: tRecords, findings: tFindings, summary: tSummary }[tab]();
+  const body = $("tab-body");
+  body.innerHTML = { institution: tInstitution, attendance: tAttendance, movement: tMovement, records: tRecords, findings: tFindings, summary: tSummary }[tab]();
+  if (readOnly) body.querySelectorAll("input, select, textarea, button").forEach(el => {
+    if (!el.dataset.action) el.disabled = true;   // keep the Print button on the Summary tab working
+  });
 }
 
 function tInstitution() {
@@ -341,6 +404,11 @@ function tSummary() {
 
 /* ---------- events ---------- */
 main.addEventListener("input", e => {
+  if (e.target.id === "filter") {
+    const term = e.target.value.trim().toLowerCase();
+    document.querySelectorAll("#cards .card").forEach(c => c.classList.toggle("hidden", !c.dataset.search.includes(term)));
+    return;
+  }
   const el = e.target, path = el.dataset.path;
   if (!path || !state) return;
   setByPath(state, path, el.value);
@@ -371,6 +439,7 @@ main.addEventListener("click", e => {
   if (!t) return;
 
   if (t.dataset.tab) { tab = t.dataset.tab; return renderTab(); }
+  if (t.dataset.view) { dashView = t.dataset.view; return showDashboard(); }
 
   if (t.dataset.action === "new") return createInspection();
   if (t.dataset.action === "delete") return deleteInspection(t.dataset.id);

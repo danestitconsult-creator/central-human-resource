@@ -60,7 +60,8 @@ export function initAuth(onUser) {
     try {
       const cred = await createUserWithEmailAndPassword(auth, $("signup-email").value.trim(), $("signup-password").value);
       await updateProfile(cred.user, { displayName: $("signup-name").value.trim() });
-      onUser({ ...cred.user, displayName: $("signup-name").value.trim(), uid: cred.user.uid, email: cred.user.email });
+      await cred.user.reload();
+      onUser(auth.currentUser);
     } catch (err) { showError(err); }
     busy(e.target, false);
   });
