@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Staff Attendance &amp; Movement Checks</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div id="config-warning" class="banner hidden">
+    Firebase is not configured yet. Open <code>js/firebase-config.js</code> and paste your project's web config (see README).
+  </div>
+
+  <!-- ===== Login / Sign up ===== -->
+  <section id="auth-view" class="auth-wrap hidden">
+    <div class="auth-card">
+      <h1>Staff Attendance &amp; Movement Checks</h1>
+      <p class="muted">Sign in to record and review institution checks.</p>
+
+      <div class="seg" role="tablist">
+        <button class="seg-btn active" data-auth-tab="login" type="button">Log in</button>
+        <button class="seg-btn" data-auth-tab="signup" type="button">Create account</button>
+      </div>
+
+      <form id="login-form" class="stack">
+        <label>Email <input type="email" id="login-email" autocomplete="email" required></label>
+        <label>Password <input type="password" id="login-password" autocomplete="current-password" required></label>
+        <button class="btn primary" type="submit">Log in</button>
+        <button class="link" type="button" id="forgot-btn">Forgot password?</button>
+      </form>
+
+      <form id="signup-form" class="stack hidden">
+        <label>Full name <input type="text" id="signup-name" autocomplete="name" required></label>
+        <label>Email <input type="email" id="signup-email" autocomplete="email" required></label>
+        <label>Password <input type="password" id="signup-password" autocomplete="new-password" minlength="6" required></label>
+        <label>Confirm password <input type="password" id="signup-confirm" autocomplete="new-password" minlength="6" required></label>
+        <button class="btn primary" type="submit">Create account</button>
+      </form>
+
+      <div class="divider"><span>or</span></div>
+      <button class="btn" id="google-btn" type="button">Continue with Google</button>
+      <p id="auth-error" class="error hidden"></p>
+    </div>
+  </section>
+
+  <!-- ===== Signed-in app ===== -->
+  <div id="app-view" class="hidden">
+    <header class="topbar">
+      <a href="#/" class="brand">Attendance &amp; Movement Checks</a>
+      <div class="user">
+        <span id="user-label" class="muted"></span>
+        <button class="btn small" id="logout-btn" type="button">Log out</button>
+      </div>
+    </header>
+    <main id="main"></main>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
