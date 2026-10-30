@@ -1,11 +1,10 @@
-// Paste your Firebase web app config here.
-// Firebase console > Project settings > General > Your apps > Web app > SDK setup and configuration.
-// These values are NOT secrets: access is protected by Firebase Auth + Firestore security rules.
-export const firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_PROJECT_ID.appspot.com",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId: "YOUR_APP_ID"
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
+const firebaseConfig = {
+  apiKey: "AIzaSyA37N8ahJ1nC2SAm3P7CKpm361foA_0w70",
+  authDomain: "human-resource-ecc1a.firebaseapp.com",
+  projectId: "human-resource-ecc1a",
+  storageBucket: "human-resource-ecc1a.firebasestorage.app",
+  messagingSenderId: "365771134914",
+  appId: "1:365771134914:web:29e723657a97a99ca2e85b",
+  measurementId: "G-EJWKC1PHHW"
 };
