@@ -19,6 +19,28 @@ const TABS = [
   ["summary", "Summary"]
 ];
 const CHECK_TYPES = ["Announced", "Unannounced"];
+
+const DEFAULT_INSTITUTIONS = [
+  "CENTRAL REGIONAL DIRECTORATE", "AJUMAKO AFRANSE TECHNICAL", "TSC ASSIN ADUBIASE TECHNICAL", "ASSIN FOSO TECHNICAL",
+  "BIRIWA TECHNICAL", "CAPE COAST TECHNICAL", "ENYAN ABAASA TECHNICAL", "GOMOA ADAA TECHNICAL", "NEW EBU TECHNICAL",
+  "ASAFORA TECHNICAL", "PANFOKROM TECHNICAL", "MANKESSIM TECHNICAL", "BREMAN ASIKUMA TECHNICAL",
+  "SOCIAL WELFARE GIRLS TECHNICAL", "ASSIN JAKAI TECHNICAL", "ASUANSI TECHNICAL", "AGONA SWEDRU TECHNICAL",
+  "WINNEBA TECHNICAL", "TSC AWUTU BERAKU TECHNICAL", "GOMOA MAMPONG TECHNICAL"
+];
+
+// The 22 Metropolitan, Municipal and District Assemblies of the Central Region of Ghana
+const DISTRICTS = [
+  "Abura-Asebu-Kwamankese", "Agona East", "Agona West Municipal", "Ajumako-Enyan-Essiam", "Asikuma-Odoben-Brakwa",
+  "Assin Central Municipal", "Assin North", "Assin South", "Awutu Senya", "Awutu Senya East Municipal",
+  "Cape Coast Metropolitan", "Effutu Municipal", "Ekumfi", "Gomoa Central", "Gomoa East", "Gomoa West",
+  "Komenda-Edina-Eguafo-Abirem (KEEA) Municipal", "Mfantsiman Municipal", "Twifo Atti-Morkwa",
+  "Twifo-Heman-Lower Denkyira", "Upper Denkyira East Municipal", "Upper Denkyira West"
+];
+
+const STAFF_CATEGORIES = ["Principals", "Regional Staff", "Institute staff", "NSS Personnels", "Voluntary Staff"];
+
+const sortList = arr => [...arr].sort((a, b) => a.localeCompare(b, "en", { sensitivity: "base" }));
+let institutions = sortList(DEFAULT_INSTITUTIONS);
 const STATUSES = ["On time", "Late", "Absent", "On leave", "On duty elsewhere"];
 const RATINGS = ["Good", "Fair", "Poor"];
 const AREAS = [["attendance", "Attendance"], ["punctuality", "Punctuality"], ["movement", "Staff movement control"], ["records", "Quality of records"]];
@@ -29,7 +51,7 @@ let profile = { role: "monitor" }, readOnly = false, dashView = "mine";
 let saveTimer = null, dirty = false;
 
 /* ---------- blank data ---------- */
-const blankAtt = () => ({ name: "", level: "", dept: "", signed: "", arrival: "", present: "", status: "", remarks: "" });
+const blankAtt = () => ({ name: "", level: "", grade: "", dept: "", signed: "", arrival: "", present: "", status: "", remarks: "" });
 const blankMov = () => ({ name: "", level: "", dept: "", left: "", reason: "", destination: "", authorisedBy: "", entered: "", expectedReturn: "", remarks: "" });
 const blankFind = () => ({ finding: "", level: "", evidence: "", action: "", officer: "", deadline: "" });
 const rep = (n, f) => Array.from({ length: n }, f);
@@ -39,7 +61,7 @@ function newInspection() {
     ownerId: user.uid,
     ownerName: user.displayName || user.email || "",
     createdAt: Date.now(), updatedAt: Date.now(),
-    institution: { name: "", location: "", head: "", date: "", type: "", team: "", arrived: "", departed: "", roll: "", startTime: "", categories: "" },
+    institution: { name: "", location: "", head: "", date: "", type: "", team: "", arrived: "", departed: "", roll: "", startTime: "", categories: [] },
     attendance: rep(10, blankAtt),
     movement: rep(5, blankMov),
     records: CHECKLIST.map(() => ({ response: "", remarks: "" })),
@@ -50,13 +72,22 @@ function newInspection() {
 }
 
 // Make sure documents loaded from Firestore always have every field
+const yn = v => (v === "Y" ? "Yes" : v === "N" ? "No" : v || "");   // older checks stored Y / N
+
+function parseCategories(v) {
+  const list = Array.isArray(v) ? v : String(v || "").split(/[,;\n]/);
+  return STAFF_CATEGORIES.filter(c => list.some(x => String(x).trim().toLowerCase() === c.toLowerCase()));
+}
+
 function normalise(d) {
   const base = newInspection();
   return {
     ...base, ...d,
-    institution: { ...base.institution, ...(d.institution || {}) },
-    attendance: d.attendance?.length ? d.attendance : base.attendance,
-    movement: d.movement?.length ? d.movement : base.movement,
+    institution: { ...base.institution, ...(d.institution || {}), categories: parseCategories(d.institution?.categories) },
+    attendance: (d.attendance?.length ? d.attendance : base.attendance)
+      .map(r => ({ ...blankAtt(), ...r, signed: yn(r.signed), present: yn(r.present) })),
+    movement: (d.movement?.length ? d.movement : base.movement)
+      .map(r => ({ ...blankMov(), ...r, entered: yn(r.entered) })),
     records: CHECKLIST.map((_, i) => ({ ...base.records[i], ...(d.records?.[i] || {}) })),
     findings: d.findings?.length ? d.findings : base.findings,
     assessment: { ...base.assessment, ...(d.assessment || {}) },
@@ -73,8 +104,8 @@ function toast(msg) {
 const opts = (list, val, blank = true) =>
   (blank ? '<option value=""></option>' : "") + list.map(o => `<option${o === val ? " selected" : ""}>${esc(o)}</option>`).join("");
 const inp = (path, val, type = "text", extra = "") => `<input type="${type}" data-path="${path}" value="${esc(val)}" ${extra}>`;
-const sel = (path, list, val) => `<select data-path="${path}">${opts(list, val)}</select>`;
-const YN = ["Y", "N"];
+const sel = (path, list, val) => `<select data-path="${path}" data-val="${esc(val)}">${opts(list, val)}</select>`;
+const YN = ["Yes", "No"];
 
 function setByPath(obj, path, value) {
   const keys = path.split(".");
@@ -85,7 +116,12 @@ function setByPath(obj, path, value) {
 const getByPath = (obj, path) => path.split(".").reduce((o, k) => o?.[k], obj);
 
 /* ---------- saving ---------- */
-function setStatus(text) { const s = $("save-status"); if (s) s.textContent = text; }
+function setStatus(text) {
+  const el = $("save-status");
+  if (!el) return;
+  el.textContent = text;
+  el.className = "muted small " + (/failed/i.test(text) ? "failed" : /unsaved|saving|on this device/i.test(text) ? "pending" : "");
+}
 
 function scheduleSave() {
   if (readOnly) return;
@@ -136,8 +172,54 @@ async function loadProfile() {
       }
     }
   } catch (e) { console.warn("Could not load profile (are the Firestore rules published?)", e); }
-  $("user-label").textContent = user.displayName || user.email;
+  const who = user.displayName || user.email || "";
+  $("user-label").textContent = who;
+  $("avatar").textContent = who.split(/[\s@.]+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join("") || "?";
   $("role-badge").classList.toggle("hidden", !isLead());
+}
+
+async function loadInstitutions() {
+  institutions = sortList(DEFAULT_INSTITUTIONS);
+  try {
+    const snap = await getDoc(doc(db, "config", "institutions"));
+    if (snap.exists() && Array.isArray(snap.data().list)) institutions = sortList(snap.data().list);
+  } catch (e) { console.warn("Could not load institution list (are the Firestore rules published?)", e); }
+}
+
+// Saves the shared institution list. Returns true on success, restores the old list on failure.
+async function persistInstitutions(list) {
+  const previous = institutions;
+  institutions = sortList(list);
+  try {
+    const write = setDoc(doc(db, "config", "institutions"), { list: institutions, updatedAt: Date.now(), updatedBy: user.uid });
+    if (navigator.onLine) await write; else write.catch(console.error);
+    return true;
+  } catch (err) {
+    institutions = previous;
+    toast("Could not update the institution list: " + (err.code || err.message));
+    return false;
+  }
+}
+
+async function addInstitution() {
+  const raw = prompt("Name of the new institution:");
+  if (raw === null) return;
+  const name = raw.trim().replace(/\s+/g, " ").toUpperCase();
+  if (!name) return;
+  if (institutions.some(x => x.toLowerCase() === name.toLowerCase())) return toast("That institution is already in the list.");
+  if (await persistInstitutions([...institutions, name])) {
+    state.institution.name = name;
+    $("title").textContent = name;
+    scheduleSave(); renderTab(); toast("Institution added");
+  }
+}
+
+async function deleteInstitution() {
+  const name = state.institution.name;
+  if (!name) return toast("Select an institution to delete first.");
+  if (!institutions.includes(name)) return toast("That name is not in the list.");
+  if (!confirm(`Remove "${name}" from the institution list?\n\nChecks already recorded for it are not deleted.`)) return;
+  if (await persistInstitutions(institutions.filter(x => x !== name))) { renderTab(); toast("Institution removed from the list"); }
 }
 
 function updateNet() { $("offline-badge").classList.toggle("hidden", navigator.onLine); }
@@ -158,7 +240,7 @@ initAuth(async u => {
   $("auth-view").classList.toggle("hidden", !!u);
   $("app-view").classList.toggle("hidden", !u);
   updateNet();
-  if (u) { await loadProfile(); route(); }
+  if (u) { await loadProfile(); await loadInstitutions(); route(); }
   else { state = null; docId = null; profile = { role: "monitor" }; dashView = "mine"; main.innerHTML = ""; }
 });
 
@@ -179,30 +261,54 @@ async function showDashboard() {
         <button class="seg-btn ${all ? "" : "active"}" data-view="mine">My checks</button>
         <button class="seg-btn ${all ? "active" : ""}" data-view="all">All monitors</button></div>` : "";
 
+    const toneOf = r => (r === null ? "none" : r >= 0.9 ? "good" : r >= 0.75 ? "warn" : "bad");
+
     const card = i => {
       const own = i.ownerId === user.uid;
+      const sum = computeSummary(i);
       const search = [i.institution?.name, i.institution?.location, i.ownerName].join(" ").toLowerCase();
-      return `<article class="card" data-search="${esc(search)}">
-        <h3>${esc(i.institution?.name || "Untitled check")}</h3>
-        <p class="muted">${esc(i.institution?.location || "No location")}</p>
-        <p class="meta"><span>${esc(i.institution?.date || "No date")}</span>
-          ${i.institution?.type ? `<span class="pill">${esc(i.institution.type)}</span>` : ""}</p>
-        ${all ? `<p class="small">Monitor: <b>${esc(own ? "You" : (i.ownerName || "Unknown"))}</b></p>` : ""}
-        <p class="muted small">Updated ${new Date(i.updatedAt || 0).toLocaleString()}</p>
+      return `<article class="card tone-${toneOf(sum.attendanceRate)}" data-search="${esc(search)}">
+        <div class="card-top">
+          <div><h3>${esc(i.institution?.name || "Untitled check")}</h3>
+            <p class="muted small">${esc(i.institution?.location || "No district chosen")}</p></div>
+          <div class="rate"><b>${pct(sum.attendanceRate)}</b><span>attendance</span></div>
+        </div>
+        <div class="chips">
+          <span>${esc(i.institution?.date ? new Date(i.institution.date + "T00:00").toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "No date")}</span>
+          ${i.institution?.type ? `<span class="pill">${esc(i.institution.type)}</span>` : ""}
+          ${all ? `<span>by ${esc(own ? "you" : (i.ownerName || "unknown"))}</span>` : ""}
+        </div>
+        <div class="mini">
+          <div><b>${sum.listed}</b>staff listed</div>
+          <div><b>${sum.late}</b>late</div>
+          <div><b>${sum.absent}</b>absent</div>
+        </div>
         <div class="row-actions">
           <a class="btn small primary" href="#/i/${i.id}">${own ? "Open" : "View"}</a>
           ${own ? `<button class="btn small danger" data-action="delete" data-id="${i.id}">Delete</button>` : ""}
         </div></article>`;
     };
 
+    const hr = new Date().getHours();
+    const greeting = hr < 12 ? "Good morning" : hr < 17 ? "Good afternoon" : "Good evening";
+    const first = (user.displayName || user.email || "").split(/[\s@]/)[0];
+    const rates = items.map(i => computeSummary(i).attendanceRate).filter(r => r !== null);
+    const avg = rates.length ? rates.reduce((x, y) => x + y, 0) / rates.length : null;
+    const places = new Set(items.map(i => i.institution?.name).filter(Boolean)).size;
+    const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+    const lede = items.length
+      ? `${plural(items.length, "check")} ${all ? "from all monitors" : "recorded"} across ${plural(places, "institution")}.${avg !== null ? ` Average attendance ${pct(avg)}.` : ""}`
+      : "Record your first institution check to see results here.";
+
     main.innerHTML = `
       <div class="page-head">
-        <h2>${all ? "All institution checks" : "My institution checks"}</h2>
+        <div><h2>${esc(greeting)}${first ? ", " + esc(first) : ""}</h2><p class="muted">${esc(lede)}</p></div>
         <div class="head-actions">${toggle}<button class="btn primary" data-action="new">+ New check</button></div>
       </div>
-      ${all ? `<input id="filter" class="filter" type="search" placeholder="Filter by institution, location or monitor…">` : ""}
+      ${all ? `<input id="filter" class="filter" type="search" placeholder="Filter by institution, district or monitor…">` : ""}
       ${items.length ? `<div class="cards" id="cards">${items.map(card).join("")}</div>`
-        : '<div class="empty"><p>No checks yet.</p><p class="muted">Click <b>New check</b> to record your first institution visit.</p></div>'}`;
+        : `<div class="empty"><h3>No checks yet</h3><p class="muted">Start a check when you arrive at an institution. It saves as you type.</p>
+           <button class="btn primary" data-action="new">+ Start your first check</button></div>`}`;
   } catch (err) {
     console.error(err);
     main.innerHTML = `<p class="error pad">Could not load checks: ${esc(err.code || err.message)}.<br>
@@ -246,6 +352,22 @@ async function openEditor(id) {
   }
 }
 
+const filled = v => String(v ?? "").trim() !== "";
+function tabDone(k) {
+  if (!state) return false;
+  return ({
+    institution: () => filled(state.institution.name) && filled(state.institution.date),
+    attendance: () => state.attendance.some(r => filled(r.name)),
+    movement: () => state.movement.some(r => filled(r.name)),
+    records: () => state.records.some(r => filled(r.response)),
+    findings: () => state.findings.some(r => filled(r.finding)),
+    summary: () => false
+  })[k]();
+}
+function updateTabDots() {
+  document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("done", tabDone(b.dataset.tab)));
+}
+
 function renderEditor() {
   main.innerHTML = `
     <div class="editor-head">
@@ -255,7 +377,7 @@ function renderEditor() {
       <button class="btn small" data-action="export">Export Excel</button>
     </div>
     ${readOnly ? `<p class="banner-ro">Read-only view of a check recorded by <b>${esc(state.ownerName || "another monitor")}</b>.</p>` : ""}
-    <nav class="tabs" id="tabs">${TABS.map(([k, l]) => `<button data-tab="${k}" class="${k === tab ? "active" : ""}">${l}</button>`).join("")}</nav>
+    <nav class="tabs" id="tabs">${TABS.map(([k, l]) => `<button data-tab="${k}" class="${k === tab ? "active" : ""}${tabDone(k) ? " done" : ""}">${k === "summary" ? "" : '<i class="dot"></i>'}${l}</button>`).join("")}</nav>
     <div id="tab-body" class="panel"></div>`;
   renderTab();
 }
@@ -272,19 +394,51 @@ function renderTab() {
 function tInstitution() {
   const i = state.institution;
   const f = (label, key, type = "text") => `<label>${label}${inp("institution." + key, i[key], type)}</label>`;
-  return `<h3>Institution details</h3><div class="grid">
-    ${f("Name of institution", "name")}
-    ${f("Location / district", "location")}
-    ${f("Head of institution", "head")}
-    ${f("Date of check", "date", "date")}
-    <label>Type of check<select data-path="institution.type">${opts(CHECK_TYPES, i.type)}</select></label>
-    ${f("Monitoring team members", "team")}
-    ${f("Time team arrived", "arrived", "time")}
-    ${f("Time team departed", "departed", "time")}
-    ${f("Total staff on nominal roll", "roll", "number")}
-    ${f("Official start time", "startTime", "time")}
-    <label class="wide">Staff categories covered<textarea data-path="institution.categories" rows="2">${esc(i.categories)}</textarea></label>
-  </div>`;
+  const listed = (list, val, placeholder) =>
+    `<option value="">${placeholder}</option>` + list.map(o => `<option${o === val ? " selected" : ""}>${esc(o)}</option>`).join("") +
+    (val && !list.includes(val) ? `<option value="${esc(val)}" selected>${esc(val)} (not in list)</option>` : "");
+  const cats = i.categories || [];
+  return `
+  <section class="section">
+    <h3>Institution <small>Where the check took place</small></h3>
+    <div class="grid">
+      <div class="field">
+        <span>Name of institution</span>
+        <div class="inline">
+          <select data-path="institution.name">${listed(institutions, i.name, "Select institution…")}</select>
+          <button type="button" class="btn small" data-inst="add" title="Add an institution to the list">+ Add</button>
+          <button type="button" class="btn small danger" data-inst="del" title="Remove the selected institution from the list">Delete</button>
+        </div>
+      </div>
+      <label>Location / district<select data-path="institution.location">${listed(DISTRICTS, i.location, "Select district…")}</select></label>
+      ${f("Head of institution", "head")}
+    </div>
+  </section>
+  <section class="section">
+    <h3>The visit <small>Date, team and timing</small></h3>
+    <div class="grid">
+      ${f("Date of check", "date", "date")}
+      <label>Type of check<select data-path="institution.type">${opts(CHECK_TYPES, i.type)}</select></label>
+      ${f("Monitoring team members", "team")}
+      ${f("Time team arrived", "arrived", "time")}
+      ${f("Time team departed", "departed", "time")}
+      ${f("Official start time", "startTime", "time")}
+    </div>
+  </section>
+  <section class="section">
+    <h3>Staff <small>Who the check covers</small></h3>
+    <div class="grid">
+      ${f("Total staff on nominal roll", "roll", "number")}
+      <div class="field">
+        <span>Staff categories covered</span>
+        <details class="multi">
+          <summary id="cats-summary">${esc(cats.length ? cats.join(", ") : "Select categories…")}</summary>
+          <div class="multi-list">${STAFF_CATEGORIES.map(c => `<label class="check">
+            <input type="checkbox" data-multi="institution.categories" value="${esc(c)}"${cats.includes(c) ? " checked" : ""}> ${esc(c)}</label>`).join("")}</div>
+        </details>
+      </div>
+    </div>
+  </section>`;
 }
 
 function tAttendance() {
@@ -292,6 +446,7 @@ function tAttendance() {
     <td class="num">${n + 1}</td>
     <td>${inp(`attendance.${n}.name`, r.name)}</td>
     <td>${sel(`attendance.${n}.level`, LEVELS, r.level)}</td>
+    <td>${inp(`attendance.${n}.grade`, r.grade)}</td>
     <td>${inp(`attendance.${n}.dept`, r.dept)}</td>
     <td>${sel(`attendance.${n}.signed`, YN, r.signed)}</td>
     <td>${inp(`attendance.${n}.arrival`, r.arrival, "time")}</td>
@@ -302,7 +457,7 @@ function tAttendance() {
   return `<h3>Attendance and punctuality</h3>
     <p class="muted small">Entering an arrival time sets the status to <b>On time</b> or <b>Late</b> automatically using the official start time (you can still change it).</p>
     <div class="scroll"><table class="grid-table"><thead><tr>
-      <th>No.</th><th>Name of staff</th><th>Level</th><th>Unit / Dept</th><th>Signed register?</th>
+      <th>No.</th><th>Name of staff</th><th>Level</th><th>Grade</th><th>Unit / Dept</th><th>Signed register?</th>
       <th>Arrival (hh:mm)</th><th>Physically present?</th><th>Status</th><th>Remarks</th><th></th>
     </tr></thead><tbody>${rows}</tbody></table></div>
     <button class="btn" data-add="attendance">+ Add row (${state.attendance.length}/${LIMITS.attendance})</button>`;
@@ -378,27 +533,64 @@ function tFindings() {
 
 function tSummary() {
   const s = computeSummary(state), i = state.institution;
+  const toneOf = r => (r === null ? "none" : r >= 0.9 ? "good" : r >= 0.75 ? "warn" : "bad");
   const r = (l, v) => `<tr><td>${l}</td><td class="val">${esc(v)}</td></tr>`;
-  const lv = s.byLevel.map(x => `<tr><td>${x.level}</td><td>${x.listed}</td><td>${x.present}</td><td>${x.late}</td><td>${x.absent}</td><td>${pct(x.rate)}</td></tr>`).join("");
-  return `<div class="page-head"><h3>Summary for this institution</h3><button class="btn small" data-action="print">Print</button></div>
-    <p class="muted small">Calculated automatically from the other tabs.</p>
+
+  const kpi = (label, rate, sub) => `<div class="kpi tone-${toneOf(rate)}">
+    <div class="ring-wrap"><div class="ring" style="--p:${rate === null ? 0 : Math.round(rate * 1000) / 10}"></div><span>${pct(rate)}</span></div>
+    <div><b>${label}</b><p class="muted small">${sub}</p></div></div>`;
+
+  const segs = [["On time", s.onTime, "good"], ["Late", s.late, "warn"], ["Absent without approval", s.absent, "bad"], ["Absent with approval", s.approved, "info"]];
+  const bar = s.listed
+    ? segs.filter(x => x[1]).map(([l, n, t]) => `<i class="fill-${t}" style="flex:${n}" title="${l}: ${n}"></i>`).join("")
+    : '<i class="fill-none" style="flex:1"></i>';
+
+  const flag = (n, label) => `<div class="flag${n > 0 ? " raised" : ""}"><b>${n}</b><span>${label}</span></div>`;
+
+  const lv = s.byLevel.map(x => `<tr><td>${x.level}</td><td>${x.listed}</td><td>${x.present}</td><td>${x.late}</td><td>${x.absent}</td>
+    <td><div class="cellbar"><div class="bar"><i class="fill-${toneOf(x.rate)}" style="flex:${x.rate === null ? 0 : x.rate}"></i><i style="flex:${x.rate === null ? 1 : 1 - x.rate};background:transparent;min-width:0"></i></div><span>${pct(x.rate)}</span></div></td></tr>`).join("");
+
+  const when = i.date ? new Date(i.date + "T00:00").toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" }) : "No date set";
+
+  return `<div class="sum-head">
+      <div><h3>${esc(i.name || "Untitled check")}</h3>
+        <p class="muted">${esc([i.location, when, i.type].filter(Boolean).join(", "))}</p></div>
+      <button class="btn small" data-action="print">Print summary</button>
+    </div>
+
+    <div class="kpis">
+      ${kpi("Attendance rate", s.attendanceRate, `${s.onTime + s.late} of ${s.listed} listed staff were present`)}
+      ${kpi("Punctuality rate", s.punctualityRate, `${s.onTime} of ${s.onTime + s.late} present staff were on time`)}
+      ${kpi("Records compliance", s.complianceRate, `${s.recordsYes} Yes, ${s.recordsNo} No on the checklist`)}
+    </div>
+
+    <div class="dist">
+      <h4>How the ${s.listed} listed staff were recorded</h4>
+      <div class="bar">${bar}</div>
+      <ul class="legend">${segs.map(([l, n, t]) => `<li><i class="fill-${t}"></i>${l} <b>${n}</b></li>`).join("")}</ul>
+    </div>
+
+    <h4 style="margin-bottom:10px">Needs attention</h4>
+    <div class="flags">
+      ${flag(s.signedNotPresent, "Signed the register but were not present")}
+      ${flag(s.notInBook, "Out of office, not in the movement book")}
+      ${flag(s.absent, "Absent without approval")}
+    </div>
+
     <div class="two-col">
       <table class="grid-table"><tbody>
         <tr class="sec"><td colspan="2">Institution</td></tr>
-        ${r("Institution", i.name || "—")}${r("Date of check", i.date || "—")}${r("Type of check", i.type || "—")}${r("Staff on nominal roll (as entered)", i.roll || "—")}
+        ${r("Staff on nominal roll (as entered)", i.roll || "—")}
+        ${r("Staff categories covered", (i.categories || []).join(", ") || "—")}
         <tr class="sec"><td colspan="2">Attendance</td></tr>
         ${r("Staff listed on attendance sheet", s.listed)}${r("Present on time", s.onTime)}${r("Present but late", s.late)}
-        ${r("Absent with approval (leave / on duty elsewhere)", s.approved)}${r("Absent without approval", s.absent)}
-        ${r("Signed register but not physically present", s.signedNotPresent)}
-        ${r("Attendance rate (present / listed)", pct(s.attendanceRate))}${r("Punctuality rate (on time / present)", pct(s.punctualityRate))}
+        ${r("Absent with approval (leave or on duty elsewhere)", s.approved)}${r("Absent without approval", s.absent)}
         <tr class="sec"><td colspan="2">Staff movement</td></tr>
         ${r("Staff found out of office", s.movementListed)}${r("Not entered in movement book", s.notInBook)}
-        <tr class="sec"><td colspan="2">Records</td></tr>
-        ${r("Records compliance rate", pct(s.complianceRate))}
       </tbody></table>
-      <div><h4>By staff level</h4>
-      <table class="grid-table"><thead><tr><th>Level</th><th>Listed</th><th>Present</th><th>Late</th><th>Absent (no approval)</th><th>Attendance rate</th></tr></thead><tbody>${lv}</tbody></table>
-      <p class="muted small">"Present" = status On time or Late. "Absent with approval" = On leave or On duty elsewhere. Staff without a Level selected are not in the level table.</p></div>
+      <div><h4 style="margin-bottom:10px">By staff level</h4>
+      <div class="scroll" style="max-height:none;margin-top:0"><table class="grid-table"><thead><tr><th>Level</th><th>Listed</th><th>Present</th><th>Late</th><th>Absent</th><th>Attendance rate</th></tr></thead><tbody>${lv}</tbody></table></div>
+      <p class="muted small">Present means On time or Late. Absent means without approval. Staff with no Level selected are not counted here.</p></div>
     </div>`;
 }
 
@@ -410,8 +602,15 @@ main.addEventListener("input", e => {
     return;
   }
   const el = e.target, path = el.dataset.path;
+  if (el.dataset.multi && state) {
+    const vals = [...main.querySelectorAll(`input[data-multi="${el.dataset.multi}"]:checked`)].map(x => x.value);
+    setByPath(state, el.dataset.multi, vals);
+    $("cats-summary").textContent = vals.length ? vals.join(", ") : "Select categories…";
+    return scheduleSave();
+  }
   if (!path || !state) return;
   setByPath(state, path, el.value);
+  if (el.tagName === "SELECT") el.dataset.val = el.value;
 
   if (path === "institution.name") $("title").textContent = el.value || "Untitled check";
 
@@ -422,15 +621,16 @@ main.addEventListener("input", e => {
     if (!row.status || row.status === "On time" || row.status === "Late") {
       row.status = el.value > state.institution.startTime ? "Late" : "On time";
       const s = main.querySelector(`[data-path="attendance.${m[1]}.status"]`);
-      if (s) s.value = row.status;
+      if (s) { s.value = row.status; s.dataset.val = row.status; }
     }
     if (!row.present) {
-      row.present = "Y";
+      row.present = "Yes";
       const p = main.querySelector(`[data-path="attendance.${m[1]}.present"]`);
-      if (p) p.value = "Y";
+      if (p) { p.value = "Yes"; p.dataset.val = "Yes"; }
     }
   }
   if (path.startsWith("records.")) $("records-footer").innerHTML = recordsFooter();
+  updateTabDots();
   scheduleSave();
 });
 
@@ -439,6 +639,8 @@ main.addEventListener("click", e => {
   if (!t) return;
 
   if (t.dataset.tab) { tab = t.dataset.tab; return renderTab(); }
+  if (t.dataset.inst === "add") return addInstitution();
+  if (t.dataset.inst === "del") return deleteInstitution();
   if (t.dataset.view) { dashView = t.dataset.view; return showDashboard(); }
 
   if (t.dataset.action === "new") return createInspection();
@@ -450,7 +652,7 @@ main.addEventListener("click", e => {
     const k = t.dataset.add;
     if (state[k].length >= LIMITS[k]) return toast(`Maximum of ${LIMITS[k]} rows reached.`);
     state[k].push({ attendance: blankAtt, movement: blankMov, findings: blankFind }[k]());
-    scheduleSave(); return renderTab();
+    scheduleSave(); updateTabDots(); return renderTab();
   }
   if (t.dataset.del) {
     const [k, n] = t.dataset.del.split(".");
@@ -459,7 +661,7 @@ main.addEventListener("click", e => {
     const hasData = Object.values(row).some(v => String(v).trim() !== "");
     if (hasData && !confirm("Remove this row and its data?")) return;
     state[k].splice(Number(n), 1);
-    scheduleSave(); renderTab();
+    scheduleSave(); updateTabDots(); renderTab();
   }
 });
 
@@ -475,12 +677,12 @@ function exportXlsx() {
     ["Name of institution", i.name], ["Location / district", i.location], ["Head of institution", i.head],
     ["Date of check", i.date], ["Type of check", i.type], ["Monitoring team members", i.team],
     ["Time team arrived / departed", `${i.arrived} / ${i.departed}`], ["Total staff on nominal roll", i.roll],
-    ["Official start time", i.startTime], ["Staff categories covered", i.categories]]);
+    ["Official start time", i.startTime], ["Staff categories covered", (i.categories || []).join(", ")]]);
 
-  add("Attendance Sheet", [["No.", "Name of staff", "Level", "Unit / Dept", "Signed register? (Y/N)", "Arrival time", "Physically present? (Y/N)", "Status", "Remarks"],
-    ...used(d.attendance).map((r, n) => [n + 1, r.name, r.level, r.dept, r.signed, r.arrival, r.present, r.status, r.remarks])]);
+  add("Attendance Sheet", [["No.", "Name of staff", "Level", "Grade", "Unit / Dept", "Signed register?", "Arrival time", "Physically present?", "Status", "Remarks"],
+    ...used(d.attendance).map((r, n) => [n + 1, r.name, r.level, r.grade, r.dept, r.signed, r.arrival, r.present, r.status, r.remarks])]);
 
-  add("Movement Log", [["No.", "Name of staff", "Level", "Department", "Time left office", "Reason given", "Destination", "Authorised by", "Entered in movement book? (Y/N)", "Expected return", "Remarks"],
+  add("Movement Log", [["No.", "Name of staff", "Level", "Department", "Time left office", "Reason given", "Destination", "Authorised by", "Entered in movement book?", "Expected return", "Remarks"],
     ...used(d.movement).map((r, n) => [n + 1, r.name, r.level, r.dept, r.left, r.reason, r.destination, r.authorisedBy, r.entered, r.expectedReturn, r.remarks])]);
 
   add("Records Checklist", [["No.", "Item to verify", "Response", "Remarks"],

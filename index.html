@@ -3,7 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b3c4d">
   <title>Staff Attendance &amp; Movement Checks</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Public+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -11,55 +15,95 @@
     Firebase is not configured yet. Open <code>js/firebase-config.js</code> and paste your project's web config (see README).
   </div>
 
-  <!-- ===== Login / Sign up ===== -->
+  <!-- ===== Log in / Create account ===== -->
   <section id="auth-view" class="auth-wrap hidden">
-    <div class="auth-card">
-      <h1>Staff Attendance &amp; Movement Checks</h1>
-      <p class="muted">Sign in to record and review institution checks.</p>
-
-      <div class="seg" role="tablist">
-        <button class="seg-btn active" data-auth-tab="login" type="button">Log in</button>
-        <button class="seg-btn" data-auth-tab="signup" type="button">Create account</button>
+    <aside class="auth-brand">
+      <div class="brand-row">
+        <svg class="mark" viewBox="0 0 40 40" aria-hidden="true"><rect width="40" height="40" rx="11" fill="#fff" fill-opacity=".14"/><path d="M11 21.5l6.2 6.2L29.5 13" fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/><rect x="11" y="32" width="18" height="3" rx="1.5" fill="#e3a72f"/></svg>
+        <span>Attendance &amp; Movement Checks</span>
       </div>
+      <div class="brand-copy">
+        <h1>Check who is at work, and where they are.</h1>
+        <p>Record institution visits in the field, track punctuality and staff movement, and get the summary without touching a spreadsheet.</p>
+        <ul class="points">
+          <li>Keeps working when the network drops</li>
+          <li>Summary updates as you type</li>
+          <li>Export any check to Excel</li>
+        </ul>
+      </div>
+      <svg class="waves" viewBox="0 0 600 120" preserveAspectRatio="none" aria-hidden="true">
+        <path d="M0 60 C80 20 160 100 300 60 S520 20 600 60 V120 H0Z" fill="#fff" fill-opacity=".05"/>
+        <path d="M0 80 C100 45 200 115 320 80 S520 50 600 82 V120 H0Z" fill="#fff" fill-opacity=".06"/>
+        <path d="M0 100 C120 75 220 125 340 100 S520 85 600 102 V120 H0Z" fill="#fff" fill-opacity=".08"/>
+      </svg>
+      <div class="kente"></div>
+    </aside>
 
-      <form id="login-form" class="stack">
-        <label>Email <input type="email" id="login-email" autocomplete="email" required></label>
-        <label>Password <input type="password" id="login-password" autocomplete="current-password" required></label>
-        <button class="btn primary" type="submit">Log in</button>
-        <button class="link" type="button" id="forgot-btn">Forgot password?</button>
-      </form>
+    <div class="auth-panel">
+      <div class="auth-card">
+        <h2>Sign in to continue</h2>
+        <p class="muted">Use your account, or create one in under a minute.</p>
 
-      <form id="signup-form" class="stack hidden">
-        <label>Full name <input type="text" id="signup-name" autocomplete="name" required></label>
-        <label>Email <input type="email" id="signup-email" autocomplete="email" required></label>
-        <label>Password <input type="password" id="signup-password" autocomplete="new-password" minlength="6" required></label>
-        <label>Confirm password <input type="password" id="signup-confirm" autocomplete="new-password" minlength="6" required></label>
-        <button class="btn primary" type="submit">Create account</button>
-      </form>
+        <div class="seg" role="tablist">
+          <button class="seg-btn active" data-auth-tab="login" type="button">Log in</button>
+          <button class="seg-btn" data-auth-tab="signup" type="button">Create account</button>
+        </div>
 
-      <div class="divider"><span>or</span></div>
-      <button class="btn" id="google-btn" type="button">Continue with Google</button>
-      <p id="auth-error" class="error hidden"></p>
+        <form id="login-form" class="stack">
+          <label>Email <input type="email" id="login-email" autocomplete="email" required></label>
+          <label>Password <input type="password" id="login-password" autocomplete="current-password" required></label>
+          <button class="btn primary block" type="submit">Log in</button>
+          <button class="link" type="button" id="forgot-btn">Forgot password?</button>
+        </form>
+
+        <form id="signup-form" class="stack hidden">
+          <label>Full name <input type="text" id="signup-name" autocomplete="name" required></label>
+          <label>Email <input type="email" id="signup-email" autocomplete="email" required></label>
+          <label>Password <input type="password" id="signup-password" autocomplete="new-password" minlength="6" required></label>
+          <label>Confirm password <input type="password" id="signup-confirm" autocomplete="new-password" minlength="6" required></label>
+          <button class="btn primary block" type="submit">Create account</button>
+        </form>
+
+        <div class="divider"><span>or</span></div>
+        <button class="btn block" id="google-btn" type="button">
+          <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.5l6.7-6.7C35.7 2.4 30.2 0 24 0 14.6 0 6.5 5.4 2.6 13.2l7.8 6C12.3 13.5 17.7 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.3 5.5-4.8 7.2l7.6 5.9c4.4-4.1 7-10.1 7-17.6z"/><path fill="#FBBC05" d="M10.4 28.8A14.5 14.5 0 0 1 9.5 24c0-1.7.3-3.3.9-4.8l-7.8-6A24 24 0 0 0 0 24c0 3.9.9 7.5 2.6 10.8l7.8-6z"/><path fill="#34A853" d="M24 48c6.2 0 11.4-2 15.2-5.5l-7.6-5.9c-2.1 1.4-4.8 2.3-7.6 2.3-6.3 0-11.7-4-13.6-9.8l-7.8 6C6.5 42.6 14.6 48 24 48z"/></svg>
+          Continue with Google
+        </button>
+        <p id="auth-error" class="error hidden"></p>
+      </div>
     </div>
   </section>
 
   <!-- ===== Signed-in app ===== -->
   <div id="app-view" class="hidden">
     <header class="topbar">
-      <a href="#/" class="brand">Attendance &amp; Movement Checks</a>
-      <div class="user">
-        <span id="offline-badge" class="badge warn hidden">Offline: changes sync when you reconnect</span>
-        <span id="role-badge" class="badge hidden">Team lead</span>
-        <span id="user-label" class="muted"></span>
-        <button class="btn small" id="logout-btn" type="button">Log out</button>
+      <div class="topbar-in">
+        <a href="#/" class="brand">
+          <svg class="mark" viewBox="0 0 40 40" aria-hidden="true"><rect width="40" height="40" rx="11" fill="#fff" fill-opacity=".14"/><path d="M11 21.5l6.2 6.2L29.5 13" fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/><rect x="11" y="32" width="18" height="3" rx="1.5" fill="#e3a72f"/></svg>
+          <span>Attendance &amp; Movement Checks</span>
+        </a>
+        <div class="user">
+          <span id="offline-badge" class="badge warn hidden">Offline: changes sync when you reconnect</span>
+          <span id="role-badge" class="badge hidden">Team lead</span>
+          <span id="avatar" class="avatar" aria-hidden="true"></span>
+          <span id="user-label" class="user-name"></span>
+          <button class="btn small on-dark" id="logout-btn" type="button">Log out</button>
+        </div>
       </div>
+      <div class="kente"></div>
     </header>
     <main id="main"></main>
   </div>
 
-  <div id="toast" class="toast hidden"></div>
+  <div id="toast" class="toast hidden" role="status"></div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script type="module" src="js/app.js"></script>
+  <script>
+    // Caches the app so it can open offline (see sw.js)
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+    }
+  </script>
 </body>
 </html>

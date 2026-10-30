@@ -31,10 +31,10 @@ export function computeSummary(d) {
   const approved = count("On leave") + count("On duty elsewhere");
   const listed = att.length;
 
-  const signedNotPresent = attAll.filter(r => r.signed === "Y" && r.present === "N").length;
+  const signedNotPresent = attAll.filter(r => r.signed === "Yes" && r.present === "No").length;
 
   const mov = (d.movement || []).filter(named);
-  const notInBook = (d.movement || []).filter(r => r.entered === "N").length;
+  const notInBook = (d.movement || []).filter(r => r.entered === "No").length;
 
   const recs = d.records || [];
   const yes = recs.filter(r => r.response === "Yes").length;
@@ -65,4 +65,4 @@ export function computeSummary(d) {
   };
 }
 
-export const pct = n => (n === null || n === undefined ? "—" : (n * 100).toFixed(1) + "%");
+export const pct = n => (n === null || n === undefined ? "—" : (n * 100).toFixed(1).replace(/\.0$/, "") + "%");
