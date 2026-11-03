@@ -2,13 +2,20 @@
 // - Your own files: network first (so deployments show up immediately), cache as fallback.
 // - Pinned libraries and fonts (Firebase SDK, Excel export, Google Fonts): cache first.
 // - Firebase Auth / Firestore traffic is never touched here; Firestore has its own offline cache.
-const CACHE = "amc-v2";
-const SHELL = ["./", "index.html", "css/style.css", "js/app.js", "js/auth.js", "js/calc.js", "js/firebase.js", "js/firebase-config.js"];
+const CACHE = "amc-v4";
+const SHELL = [
+  "./", "index.html", "manifest.json", "favicon.ico",
+  "css/style.css",
+  "js/app.js", "js/auth.js", "js/calc.js", "js/env.js", "js/firebase.js", "js/firebase-config.js",
+  "js/roll.js", "js/roll-core.js", "js/evidence.js",
+  "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png"
+];
 const CDN = ["www.gstatic.com", "fonts.gstatic.com", "fonts.googleapis.com", "cdnjs.cloudflare.com"];
 
 self.addEventListener("install", e => {
   self.skipWaiting();
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).catch(() => {}));
+  // add files one by one so a single missing file can't stop the rest being cached
+  e.waitUntil(caches.open(CACHE).then(c => Promise.allSettled(SHELL.map(u => c.add(u)))));
 });
 
 self.addEventListener("activate", e => {
@@ -27,7 +34,7 @@ self.addEventListener("fetch", e => {
     e.respondWith(
       fetch(req)
         .then(res => { if (res.ok) { const copy = res.clone(); caches.open(CACHE).then(c => c.put(req, copy)); } return res; })
-        .catch(() => caches.match(req).then(hit => hit || caches.match("index.html")))
+        .catch(() => caches.match(req, { ignoreSearch: true }).then(hit => hit || caches.match("index.html")))
     );
   } else if (CDN.includes(url.hostname)) {
     e.respondWith(

@@ -2,8 +2,43 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#0b3c4d">
+  <meta name="description" content="Record staff attendance, punctuality and movement checks at institutions, with an automatic summary.">
+
+  <!-- Installable app (PWA) -->
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" type="image/svg+xml" href="icons/icon.svg">
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16.png">
+
+  <!-- iPhone / iPad: Home Screen icon, full-screen mode, launch screens -->
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="apple-touch-icon" sizes="120x120" href="icons/apple-touch-icon-120.png">
+  <link rel="apple-touch-icon" sizes="152x152" href="icons/apple-touch-icon-152.png">
+  <link rel="apple-touch-icon" sizes="167x167" href="icons/apple-touch-icon-167.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Attendance">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="apple-touch-startup-image" media="(device-width: 440px) and (device-height: 956px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="splash/iphone-1320x2868.png">
+  <link rel="apple-touch-startup-image" media="(device-width: 430px) and (device-height: 932px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="splash/iphone-1290x2796.png">
+  <link rel="apple-touch-startup-image" media="(device-width: 428px) and (device-height: 926px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="splash/iphone-1284x2778.png">
+  <link rel="apple-touch-startup-image" media="(device-width: 420px) and (device-height: 912px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="splash/iphone-1260x2736.png">
+  <link rel="apple-touch-startup-image" media="(device-width: 402px) and (device-height: 874px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="splash/iphone-1206x2622.png">
+  <link rel="apple-touch-startup-image" media="(device-width: 393px) and (device-height: 852px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="splash/iphone-1179x2556.png">
+  <link rel="apple-touch-startup-image" media="(device-width: 390px) and (device-height: 844px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="splash/iphone-1170x2532.png">
+  <link rel="apple-touch-startup-image" media="(device-width: 375px) and (device-height: 812px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="splash/iphone-1125x2436.png">
+  <link rel="apple-touch-startup-image" media="(device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="splash/iphone-1242x2688.png">
+  <link rel="apple-touch-startup-image" media="(device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" href="splash/iphone-828x1792.png">
+  <link rel="apple-touch-startup-image" media="(device-width: 414px) and (device-height: 736px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="splash/iphone-1242x2208.png">
+  <link rel="apple-touch-startup-image" media="(device-width: 375px) and (device-height: 667px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" href="splash/iphone-750x1334.png">
+  <link rel="apple-touch-startup-image" media="(device-width: 320px) and (device-height: 568px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" href="splash/iphone-640x1136.png">
+
   <title>Staff Attendance &amp; Movement Checks</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -50,15 +85,15 @@
         </div>
 
         <form id="login-form" class="stack">
-          <label>Email <input type="email" id="login-email" autocomplete="email" required></label>
-          <label>Password <input type="password" id="login-password" autocomplete="current-password" required></label>
+          <label>Email <input type="email" id="login-email" autocomplete="email" autocapitalize="none" autocorrect="off" spellcheck="false" inputmode="email" enterkeyhint="next" required></label>
+          <label>Password <input type="password" id="login-password" autocomplete="current-password" enterkeyhint="go" required></label>
           <button class="btn primary block" type="submit">Log in</button>
           <button class="link" type="button" id="forgot-btn">Forgot password?</button>
         </form>
 
         <form id="signup-form" class="stack hidden">
-          <label>Full name <input type="text" id="signup-name" autocomplete="name" required></label>
-          <label>Email <input type="email" id="signup-email" autocomplete="email" required></label>
+          <label>Full name <input type="text" id="signup-name" autocomplete="name" autocapitalize="words" enterkeyhint="next" required></label>
+          <label>Email <input type="email" id="signup-email" autocomplete="email" autocapitalize="none" autocorrect="off" spellcheck="false" inputmode="email" enterkeyhint="next" required></label>
           <label>Password <input type="password" id="signup-password" autocomplete="new-password" minlength="6" required></label>
           <label>Confirm password <input type="password" id="signup-confirm" autocomplete="new-password" minlength="6" required></label>
           <button class="btn primary block" type="submit">Create account</button>
@@ -83,6 +118,8 @@
           <span>Attendance &amp; Movement Checks</span>
         </a>
         <div class="user">
+          <a href="#/roll" class="btn small on-dark" id="roll-link">Nominal roll</a>
+          <button class="btn small on-dark hidden" id="install-btn" type="button">Install app</button>
           <span id="offline-badge" class="badge warn hidden">Offline: changes sync when you reconnect</span>
           <span id="role-badge" class="badge hidden">Team lead</span>
           <span id="avatar" class="avatar" aria-hidden="true"></span>
@@ -92,6 +129,11 @@
       </div>
       <div class="kente"></div>
     </header>
+    <div id="ios-hint" class="hint hidden">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M8 7l4-4 4 4M6 11H5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-8a1 1 0 0 0-1-1h-1"/></svg>
+      <span>Install this app: tap <b>Share</b>, then <b>Add to Home Screen</b>.</span>
+      <button class="link" id="ios-hint-close" type="button" aria-label="Dismiss">Got it</button>
+    </div>
     <main id="main"></main>
   </div>
 

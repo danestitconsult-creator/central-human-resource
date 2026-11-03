@@ -1,4 +1,5 @@
 import { auth } from "./firebase.js";
+import { googleSignInSupported, isEmbeddedWebView } from "./env.js";
 import {
   createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut,
   onAuthStateChanged, updateProfile, sendPasswordResetEmail,
@@ -19,7 +20,12 @@ const MESSAGES = {
   "auth/network-request-failed": "Network error. Check your connection.",
   "auth/popup-closed-by-user": "Sign-in window was closed.",
   "auth/unauthorized-domain": "This website's domain is not authorised in Firebase (Authentication > Settings > Authorized domains).",
-  "auth/operation-not-allowed": "This sign-in method is not enabled in the Firebase console."
+  "auth/operation-not-allowed": "This sign-in method is not enabled in the Firebase console.",
+  "auth/popup-blocked": "Your browser blocked the Google sign-in window. Allow pop-ups for this site, or log in with email and password.",
+  "auth/cancelled-popup-request": "Sign-in was cancelled. Please try again.",
+  "auth/web-storage-unsupported": "This browser is blocking storage, so sign-in can't work. Open the app in Safari, and turn off Private Browsing.",
+  "auth/operation-not-supported-in-this-environment": "Sign-in isn't supported in this browser. Open the app in Safari instead.",
+  "auth/internal-error": "Something went wrong signing in. Please try again."
 };
 
 function showError(err) {
@@ -34,6 +40,18 @@ function busy(form, on) {
 }
 
 export function initAuth(onUser) {
+  // Google sign-in can't work inside Home Screen apps or in-app browsers on iPhone: hide it and say what to do instead.
+  if (!googleSignInSupported) {
+    $("google-btn").classList.add("hidden");
+    document.querySelector(".divider").classList.add("hidden");
+  }
+  if (isEmbeddedWebView) {
+    const note = document.createElement("p");
+    note.className = "muted small";
+    note.textContent = "Tip: if login fails here, open this link in Safari.";
+    $("auth-error").after(note);
+  }
+
   // Switch between log in / create account
   document.querySelectorAll("[data-auth-tab]").forEach(btn => {
     btn.addEventListener("click", () => {

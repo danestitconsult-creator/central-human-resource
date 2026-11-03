@@ -1,21 +1,26 @@
 import { db, configured } from "./firebase.js";
 import { initAuth } from "./auth.js";
 import {
-  collection, doc, getDoc, setDoc, updateDoc, deleteDoc, query, where, getDocs
+  collection, doc, getDoc, getDocFromCache, setDoc, updateDoc, deleteDoc, query, where, getDocs, getDocsFromCache
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { computeSummary, pct, LEVELS, CHECKLIST } from "./calc.js";
+import { isIOS, isStandalone, isEmbeddedWebView } from "./env.js";
+import { loadRoll, loadAllRolls, saveRolls, parseRollWorkbook, prepareRoll, matchStaff, crossCheck, rollKey } from "./roll.js";
+import { EV_LIMITS, EV_CATEGORIES, prepareEvidenceFile, dataUrlToBlob, fmtSize } from "./evidence.js";
 
 const $ = id => document.getElementById(id);
 const main = $("main");
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
-const LIMITS = { attendance: 150, movement: 60, findings: 15 };
+const LIMITS = { attendance: 200, movement: 60, findings: 15 };
 const TABS = [
   ["institution", "Institution"],
   ["attendance", "Attendance"],
+  ["roll", "Nominal roll"],
   ["movement", "Movement log"],
   ["records", "Records checklist"],
   ["findings", "Findings"],
+  ["evidence", "Evidence"],
   ["summary", "Summary"]
 ];
 const CHECK_TYPES = ["Announced", "Unannounced"];
@@ -47,6 +52,7 @@ const AREAS = [["attendance", "Attendance"], ["punctuality", "Punctuality"], ["m
 const ROLES = [["lead", "Lead monitor"], ["member", "Monitoring team member"], ["head", "Head of institution (acknowledgement)"]];
 
 let user = null, state = null, docId = null, tab = "institution";
+let rollStaff = null, rollInfo = null, evidence = null, evidenceError = "", allRolls = null, lastRollTotal = null;   // HR nominal roll of the open check's institution, its evidence files, all rolls (Nominal roll page)
 let profile = { role: "monitor" }, readOnly = false, dashView = "mine";
 let saveTimer = null, dirty = false;
 
@@ -101,6 +107,58 @@ function toast(msg) {
   t.textContent = msg; t.classList.remove("hidden");
   clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.add("hidden"), 3000);
 }
+/* In-app dialogs. window.prompt/confirm are blocked or missing in iPhone Home Screen apps and wrapped apps, so we draw our own. */
+function modal({ title, message = "", input = "", confirmLabel = "OK", cancelLabel = "Cancel", danger = false }) {
+  return new Promise(resolve => {
+    const back = document.createElement("div");
+    back.className = "modal-back";
+    back.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="m-title">
+      <h3 id="m-title">${esc(title)}</h3>
+      ${message ? `<p class="muted">${esc(message)}</p>` : ""}
+      ${input ? `<label>${esc(input)}<input id="m-input" type="text" autocomplete="off" autocapitalize="characters" enterkeyhint="done"></label>` : ""}
+      <div class="modal-actions">
+        <button type="button" class="btn" data-m="cancel">${esc(cancelLabel)}</button>
+        <button type="button" class="btn ${danger ? "danger-solid" : "primary"}" data-m="ok">${esc(confirmLabel)}</button>
+      </div></div>`;
+    document.body.appendChild(back);
+    const field = back.querySelector("#m-input");
+    const done = v => { document.removeEventListener("keydown", onKey); back.remove(); resolve(v); };
+    const ok = () => done(field ? field.value : true);
+    const onKey = e => {
+      if (e.key === "Escape") done(null);
+      else if (e.key === "Enter" && e.target === field) { e.preventDefault(); ok(); }
+    };
+    back.addEventListener("click", e => {
+      if (e.target === back || e.target.dataset.m === "cancel") done(null);
+      else if (e.target.dataset.m === "ok") ok();
+    });
+    document.addEventListener("keydown", onKey);
+    (field || back.querySelector('[data-m="ok"]')).focus();
+  });
+}
+const askText = (title, label, confirmLabel) => modal({ title, input: label, confirmLabel });
+const askConfirm = (title, message, confirmLabel = "Delete") => modal({ title, message, confirmLabel, danger: true }).then(v => v === true);
+
+// Waits for the server to confirm a write, but not forever: on a weak mobile connection Firestore keeps the
+// write safely on the device and syncs later, so after a few seconds we carry on instead of freezing the screen.
+async function settle(write, ms = 6000) {
+  let timer;
+  const timeout = new Promise(res => (timer = setTimeout(() => res("pending"), ms)));
+  try { return await Promise.race([write.then(() => "synced"), timeout]); }
+  finally { clearTimeout(timer); }
+}
+
+// Reads from the server, but falls back to the copy saved on the device if the network is slow or down.
+// (navigator.onLine is often wrong on iPhones, e.g. on a weak signal.)
+async function withCacheFallback(online, cached, ms = 8000) {
+  let timer;
+  try {
+    return await Promise.race([online(), new Promise((_, rej) => (timer = setTimeout(() => rej(new Error("slow connection")), ms)))]);
+  } catch (err) {
+    try { return await cached(); } catch { throw err; }
+  } finally { clearTimeout(timer); }
+}
+
 const opts = (list, val, blank = true) =>
   (blank ? '<option value=""></option>' : "") + list.map(o => `<option${o === val ? " selected" : ""}>${esc(o)}</option>`).join("");
 const inp = (path, val, type = "text", extra = "") => `<input type="${type}" data-path="${path}" value="${esc(val)}" ${extra}>`;
@@ -137,11 +195,11 @@ async function saveNow() {
   try {
     state.updatedAt = Date.now();
     const write = setDoc(doc(db, "inspections", docId), state);
-    if (navigator.onLine) {
-      await write;
+    const outcome = navigator.onLine ? await settle(write) : "pending";
+    if (outcome === "synced") {
       setStatus("All changes saved");
     } else {
-      // Offline: the write is stored locally and sent automatically when back online.
+      // Offline or slow: the write is stored on the device and sent automatically when the connection returns.
       setStatus("Saved on this device. Will sync when online");
       write.then(() => { if (!dirty) setStatus("All changes saved"); }).catch(console.error);
     }
@@ -151,15 +209,21 @@ async function saveNow() {
   }
 }
 window.addEventListener("beforeunload", e => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+// iPhones freeze and discard pages the moment you switch apps and rarely fire "beforeunload", so save right away
+// whenever the page is hidden instead of waiting for the typing pause.
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") saveNow(); });
+window.addEventListener("pagehide", () => { saveNow(); });
 
 /* ---------- user profile, roles, network ---------- */
 const isLead = () => profile.role === "lead";
+const isHr = () => profile.role === "hr";
+const canSeeAll = () => isLead() || isHr();   // leads and HR can open every monitor's check (read-only)
 
 async function loadProfile() {
   profile = { role: "monitor" };
   try {
     const ref = doc(db, "users", user.uid);
-    const snap = await getDoc(ref);
+    const snap = await withCacheFallback(() => getDoc(ref), () => getDocFromCache(ref), 5000);
     const name = user.displayName || "", email = user.email || "";
     if (!snap.exists()) {
       profile = { name, email, role: "monitor", createdAt: Date.now() };
@@ -175,13 +239,16 @@ async function loadProfile() {
   const who = user.displayName || user.email || "";
   $("user-label").textContent = who;
   $("avatar").textContent = who.split(/[\s@.]+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join("") || "?";
-  $("role-badge").classList.toggle("hidden", !isLead());
+  const badge = $("role-badge");
+  badge.textContent = isHr() ? "HR" : "Team lead";
+  badge.classList.toggle("hidden", !canSeeAll());
 }
 
 async function loadInstitutions() {
   institutions = sortList(DEFAULT_INSTITUTIONS);
   try {
-    const snap = await getDoc(doc(db, "config", "institutions"));
+    const ref = doc(db, "config", "institutions");
+    const snap = await withCacheFallback(() => getDoc(ref), () => getDocFromCache(ref), 5000);
     if (snap.exists() && Array.isArray(snap.data().list)) institutions = sortList(snap.data().list);
   } catch (e) { console.warn("Could not load institution list (are the Firestore rules published?)", e); }
 }
@@ -192,7 +259,7 @@ async function persistInstitutions(list) {
   institutions = sortList(list);
   try {
     const write = setDoc(doc(db, "config", "institutions"), { list: institutions, updatedAt: Date.now(), updatedBy: user.uid });
-    if (navigator.onLine) await write; else write.catch(console.error);
+    if (navigator.onLine) await settle(write); else write.catch(console.error);
     return true;
   } catch (err) {
     institutions = previous;
@@ -202,7 +269,7 @@ async function persistInstitutions(list) {
 }
 
 async function addInstitution() {
-  const raw = prompt("Name of the new institution:");
+  const raw = await askText("Add an institution", "Name of the new institution", "Add");
   if (raw === null) return;
   const name = raw.trim().replace(/\s+/g, " ").toUpperCase();
   if (!name) return;
@@ -218,7 +285,7 @@ async function deleteInstitution() {
   const name = state.institution.name;
   if (!name) return toast("Select an institution to delete first.");
   if (!institutions.includes(name)) return toast("That name is not in the list.");
-  if (!confirm(`Remove "${name}" from the institution list?\n\nChecks already recorded for it are not deleted.`)) return;
+  if (!(await askConfirm(`Remove "${name}"?`, "It will be removed from the institution list. Checks already recorded for it are not deleted.", "Remove"))) return;
   if (await persistInstitutions(institutions.filter(x => x !== name))) { renderTab(); toast("Institution removed from the list"); }
 }
 
@@ -229,6 +296,11 @@ window.addEventListener("offline", updateNet);
 /* ---------- routing ---------- */
 function route() {
   if (!user) return;
+  if (location.hash === "#/new") {   // app-icon shortcut "New check"
+    history.replaceState(null, "", location.pathname + location.search + "#/");
+    return createInspection();
+  }
+  if (location.hash === "#/roll") return showRollPage();
   const m = location.hash.match(/^#\/i\/(.+)$/);
   m ? openEditor(m[1]) : showDashboard();
 }
@@ -240,8 +312,8 @@ initAuth(async u => {
   $("auth-view").classList.toggle("hidden", !!u);
   $("app-view").classList.toggle("hidden", !u);
   updateNet();
-  if (u) { await loadProfile(); await loadInstitutions(); route(); }
-  else { state = null; docId = null; profile = { role: "monitor" }; dashView = "mine"; main.innerHTML = ""; }
+  if (u) { await loadProfile(); await loadInstitutions(); showIosHint(); route(); }
+  else { state = null; docId = null; profile = { role: "monitor" }; dashView = "mine"; allRolls = null; rollStaff = null; evidence = null; main.innerHTML = ""; }
 });
 
 /* ---------- dashboard ---------- */
@@ -249,15 +321,15 @@ async function showDashboard() {
   await saveNow();
   state = null; docId = null; readOnly = false;
   main.innerHTML = '<p class="muted pad">Loading…</p>';
-  const all = isLead() && dashView === "all";
+  const all = canSeeAll() && dashView === "all";
   try {
     const q = all
       ? collection(db, "inspections")
       : query(collection(db, "inspections"), where("ownerId", "==", user.uid));
-    const snap = await getDocs(q);
+    const snap = await withCacheFallback(() => getDocs(q), () => getDocsFromCache(q));
     const items = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 
-    const toggle = isLead() ? `<div class="seg inline">
+    const toggle = canSeeAll() ? `<div class="seg inline">
         <button class="seg-btn ${all ? "" : "active"}" data-view="mine">My checks</button>
         <button class="seg-btn ${all ? "active" : ""}" data-view="all">All monitors</button></div>` : "";
 
@@ -279,7 +351,7 @@ async function showDashboard() {
           ${all ? `<span>by ${esc(own ? "you" : (i.ownerName || "unknown"))}</span>` : ""}
         </div>
         <div class="mini">
-          <div><b>${sum.listed}</b>staff listed</div>
+          <div><b>${sum.listed}${Number(i.institution?.roll) > 0 ? `<small>/${esc(i.institution.roll)}</small>` : ""}</b>staff listed${Number(i.institution?.roll) > 0 ? " of roll" : ""}</div>
           <div><b>${sum.late}</b>late</div>
           <div><b>${sum.absent}</b>absent</div>
         </div>
@@ -320,16 +392,22 @@ async function createInspection() {
   try {
     const ref = doc(collection(db, "inspections"));   // id is generated locally, so this also works offline
     const write = setDoc(ref, newInspection());
-    if (navigator.onLine) await write; else write.catch(console.error);
+    if (navigator.onLine) await settle(write); else write.catch(console.error);
     location.hash = `#/i/${ref.id}`;
   } catch (err) { toast("Could not create check: " + (err.code || err.message)); }
 }
 
 async function deleteInspection(id) {
-  if (!confirm("Delete this check permanently? This cannot be undone.")) return;
+  if (!(await askConfirm("Delete this check?", "This permanently removes the check and all its data, including evidence files. It cannot be undone."))) return;
   try {
+    // evidence files live in a sub-collection, which Firestore does not delete with the parent
+    try {
+      const q = collection(db, "inspections", id, "evidence");
+      const evs = await withCacheFallback(() => getDocs(q), () => getDocsFromCache(q), 5000);
+      evs.docs.forEach(d => deleteDoc(d.ref).catch(console.error));
+    } catch (e) { console.warn("Could not clear evidence files", e); }
     const del = deleteDoc(doc(db, "inspections", id));
-    if (navigator.onLine) await del; else del.catch(console.error);
+    if (navigator.onLine) await settle(del); else del.catch(console.error);
     toast("Deleted"); showDashboard();
   } catch (err) { toast("Could not delete: " + (err.code || err.message)); }
 }
@@ -339,14 +417,16 @@ async function openEditor(id) {
   await saveNow();
   main.innerHTML = '<p class="muted pad">Loading…</p>';
   try {
-    const snap = await getDoc(doc(db, "inspections", id));
+    const ref = doc(db, "inspections", id);
+    const snap = await withCacheFallback(() => getDoc(ref), () => getDocFromCache(ref));
     const data = snap.exists() ? snap.data() : null;
-    if (!data || (data.ownerId !== user.uid && !isLead())) {
+    if (!data || (data.ownerId !== user.uid && !canSeeAll())) {
       main.innerHTML = '<p class="pad">Check not found. <a href="#/">Back to list</a></p>'; return;
     }
-    docId = id; state = normalise(data); dirty = false; tab = "institution";
-    readOnly = data.ownerId !== user.uid;   // leads can view other monitors' checks but not edit them
+    docId = id; state = normalise(data); dirty = false; tab = "institution"; rollStaff = null; rollInfo = null; evidence = null; evidenceError = ""; lastRollTotal = null;
+    readOnly = data.ownerId !== user.uid;   // leads and HR can view other monitors' checks but not edit them (HR can still add evidence)
     renderEditor();
+    refreshRoll();
   } catch (err) {
     main.innerHTML = `<p class="error pad">Could not open check: ${esc(err.code || err.message)} <a href="#/">Back</a></p>`;
   }
@@ -361,6 +441,8 @@ function tabDone(k) {
     movement: () => state.movement.some(r => filled(r.name)),
     records: () => state.records.some(r => filled(r.response)),
     findings: () => state.findings.some(r => filled(r.finding)),
+    roll: () => !!rollStaff && crossCheck(state.attendance, rollStaff).matched > 0,
+    evidence: () => (evidence || []).length > 0,
     summary: () => false
   })[k]();
 }
@@ -376,7 +458,7 @@ function renderEditor() {
       <span id="save-status" class="muted small">${readOnly ? "" : "All changes saved"}</span>
       <button class="btn small" data-action="export">Export Excel</button>
     </div>
-    ${readOnly ? `<p class="banner-ro">Read-only view of a check recorded by <b>${esc(state.ownerName || "another monitor")}</b>.</p>` : ""}
+    ${readOnly ? `<p class="banner-ro">Read-only view of a check recorded by <b>${esc(state.ownerName || "another monitor")}</b>.${isHr() ? " As HR you can add evidence of the visit on the Evidence tab." : ""}</p>` : ""}
     <nav class="tabs" id="tabs">${TABS.map(([k, l]) => `<button data-tab="${k}" class="${k === tab ? "active" : ""}${tabDone(k) ? " done" : ""}">${k === "summary" ? "" : '<i class="dot"></i>'}${l}</button>`).join("")}</nav>
     <div id="tab-body" class="panel"></div>`;
   renderTab();
@@ -385,15 +467,26 @@ function renderEditor() {
 function renderTab() {
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
   const body = $("tab-body");
-  body.innerHTML = { institution: tInstitution, attendance: tAttendance, movement: tMovement, records: tRecords, findings: tFindings, summary: tSummary }[tab]();
+  body.innerHTML = { institution: tInstitution, attendance: tAttendance, movement: tMovement, records: tRecords, findings: tFindings, summary: tSummary, roll: tRoll, evidence: tEvidence }[tab]();
+  // On phones each table row becomes a card; the CSS shows each field's column heading above it (see "stackable" in style.css)
+  body.querySelectorAll("table.stackable").forEach(t => {
+    const heads = [...t.querySelectorAll("thead th")].map(th => th.textContent.trim());
+    t.querySelectorAll("tbody tr").forEach(tr => [...tr.children].forEach((td, i) => {
+      if (heads[i]) td.dataset.label = heads[i];
+      // short fields (dropdowns, times, dates, numbers) sit two to a line; long ones (names, remarks...) take the full width
+      const short = td.querySelector('select:not([data-path$=".status"]), input[type=time], input[type=date], input[type=number], [data-path$=".grade"], [data-path$=".dept"]');
+      td.classList.toggle("wide", !short);
+    }));
+    t.closest(".scroll")?.classList.add("stack");
+  });
   if (readOnly) body.querySelectorAll("input, select, textarea, button").forEach(el => {
-    if (!el.dataset.action) el.disabled = true;   // keep the Print button on the Summary tab working
+    if (!el.dataset.action && !el.closest("[data-keep]")) el.disabled = true;   // keep Print working, and the Evidence panel (HR can add evidence)
   });
 }
 
 function tInstitution() {
   const i = state.institution;
-  const f = (label, key, type = "text") => `<label>${label}${inp("institution." + key, i[key], type)}</label>`;
+  const f = (label, key, type = "text", extra = "") => `<label>${label}${inp("institution." + key, i[key], type, extra)}</label>`;
   const listed = (list, val, placeholder) =>
     `<option value="">${placeholder}</option>` + list.map(o => `<option${o === val ? " selected" : ""}>${esc(o)}</option>`).join("") +
     (val && !list.includes(val) ? `<option value="${esc(val)}" selected>${esc(val)} (not in list)</option>` : "");
@@ -428,7 +521,15 @@ function tInstitution() {
   <section class="section">
     <h3>Staff <small>Who the check covers</small></h3>
     <div class="grid">
-      ${f("Total staff on nominal roll", "roll", "number")}
+      ${f("Total staff on nominal roll (entered by monitor)", "roll", "number", 'inputmode="numeric" min="0"')}
+      <div class="field">
+        <span>Total staff on HR nominal roll</span>
+        <div class="inline roll-total-box">
+          <b id="roll-total" class="roll-total">${rollStaff ? rollStaff.length : "—"}</b>
+          <button type="button" class="btn small" data-roll="use" title="Copy the HR total into the box beside it">Use this number</button>
+        </div>
+        <small id="roll-note" class="muted">${esc(rollNote())}</small>
+      </div>
       <div class="field">
         <span>Staff categories covered</span>
         <details class="multi">
@@ -444,7 +545,8 @@ function tInstitution() {
 function tAttendance() {
   const rows = state.attendance.map((r, n) => `<tr data-row="${n}">
     <td class="num">${n + 1}</td>
-    <td>${inp(`attendance.${n}.name`, r.name)}</td>
+    <td>${inp(`attendance.${n}.name`, r.name, "text", 'list="roll-names" autocomplete="off"')}</td>
+    <td class="roll-cell" data-rb="${n}">${rollBadge(r.name)}</td>
     <td>${sel(`attendance.${n}.level`, LEVELS, r.level)}</td>
     <td>${inp(`attendance.${n}.grade`, r.grade)}</td>
     <td>${inp(`attendance.${n}.dept`, r.dept)}</td>
@@ -456,11 +558,11 @@ function tAttendance() {
     <td><button class="icon" title="Remove row" data-del="attendance.${n}">✕</button></td></tr>`).join("");
   return `<h3>Attendance and punctuality</h3>
     <p class="muted small">Entering an arrival time sets the status to <b>On time</b> or <b>Late</b> automatically using the official start time (you can still change it).</p>
-    <div class="scroll"><table class="grid-table"><thead><tr>
-      <th>No.</th><th>Name of staff</th><th>Level</th><th>Grade</th><th>Unit / Dept</th><th>Signed register?</th>
+    <div class="scroll"><table class="grid-table stackable"><thead><tr>
+      <th>No.</th><th>Name of staff</th><th>On roll?</th><th>Level</th><th>Grade</th><th>Unit / Dept</th><th>Signed register?</th>
       <th>Arrival (hh:mm)</th><th>Physically present?</th><th>Status</th><th>Remarks</th><th></th>
     </tr></thead><tbody>${rows}</tbody></table></div>
-    <button class="btn" data-add="attendance">+ Add row (${state.attendance.length}/${LIMITS.attendance})</button>`;
+    <button class="btn" data-add="attendance">+ Add row (${state.attendance.length}/${LIMITS.attendance})</button>${rollDatalist()}`;
 }
 
 function tMovement() {
@@ -478,7 +580,7 @@ function tMovement() {
     <td>${inp(`movement.${n}.remarks`, r.remarks)}</td>
     <td><button class="icon" title="Remove row" data-del="movement.${n}">✕</button></td></tr>`).join("");
   return `<h3>Staff movement log</h3>
-    <div class="scroll"><table class="grid-table"><thead><tr>
+    <div class="scroll"><table class="grid-table stackable"><thead><tr>
       <th>No.</th><th>Name of staff</th><th>Level</th><th>Department</th><th>Time left office</th><th>Reason given</th>
       <th>Destination</th><th>Authorised by</th><th>In movement book?</th><th>Expected return</th><th>Remarks</th><th></th>
     </tr></thead><tbody>${rows}</tbody></table></div>
@@ -499,7 +601,7 @@ function tRecords() {
     <td>${inp(`records.${n}.remarks`, state.records[n].remarks)}</td></tr>`).join("");
   return `<h3>Records verification checklist</h3>
     <p class="muted small">Pick Yes, No or N/A for each item and note evidence or gaps in Remarks.</p>
-    <div class="scroll"><table class="grid-table"><thead><tr><th>No.</th><th>Item to verify</th><th>Response</th><th>Remarks</th></tr></thead>
+    <div class="scroll"><table class="grid-table stackable"><thead><tr><th>No.</th><th>Item to verify</th><th>Response</th><th>Remarks</th></tr></thead>
     <tbody>${rows}</tbody><tbody id="records-footer">${recordsFooter()}</tbody></table></div>`;
 }
 
@@ -522,13 +624,13 @@ function tFindings() {
     <td>${inp(`signoff.${k}.date`, state.signoff[k].date, "date")}</td></tr>`).join("");
   return `<h3>Findings and recommendations</h3>
     <p class="muted small">Complete at the exit meeting and share a copy with the head of institution.</p>
-    <div class="scroll"><table class="grid-table"><thead><tr><th>No.</th><th>Finding</th><th>Staff level affected</th><th>Evidence</th><th>Recommended action</th><th>Responsible officer</th><th>Deadline</th><th></th></tr></thead>
+    <div class="scroll"><table class="grid-table stackable"><thead><tr><th>No.</th><th>Finding</th><th>Staff level affected</th><th>Evidence</th><th>Recommended action</th><th>Responsible officer</th><th>Deadline</th><th></th></tr></thead>
     <tbody>${rows}</tbody></table></div>
     <button class="btn" data-add="findings">+ Add finding (${state.findings.length}/${LIMITS.findings})</button>
     <h3>Overall assessment</h3>
-    <div class="scroll"><table class="grid-table"><thead><tr><th>Area</th><th>Rating</th><th>Comment</th></tr></thead><tbody>${areas}</tbody></table></div>
+    <div class="scroll"><table class="grid-table stackable"><thead><tr><th>Area</th><th>Rating</th><th>Comment</th></tr></thead><tbody>${areas}</tbody></table></div>
     <h3>Sign-off</h3>
-    <div class="scroll"><table class="grid-table"><thead><tr><th>Role</th><th>Name</th><th>Signature</th><th>Date</th></tr></thead><tbody>${sign}</tbody></table></div>`;
+    <div class="scroll"><table class="grid-table stackable"><thead><tr><th>Role</th><th>Name</th><th>Signature</th><th>Date</th></tr></thead><tbody>${sign}</tbody></table></div>`;
 }
 
 function tSummary() {
@@ -575,12 +677,13 @@ function tSummary() {
       ${flag(s.signedNotPresent, "Signed the register but were not present")}
       ${flag(s.notInBook, "Out of office, not in the movement book")}
       ${flag(s.absent, "Absent without approval")}
+      ${rollFlags(flag)}
     </div>
 
     <div class="two-col">
       <table class="grid-table"><tbody>
         <tr class="sec"><td colspan="2">Institution</td></tr>
-        ${r("Staff on nominal roll (as entered)", i.roll || "—")}
+        ${rollSummaryRows(r, i)}
         ${r("Staff categories covered", (i.categories || []).join(", ") || "—")}
         <tr class="sec"><td colspan="2">Attendance</td></tr>
         ${r("Staff listed on attendance sheet", s.listed)}${r("Present on time", s.onTime)}${r("Present but late", s.late)}
@@ -594,6 +697,357 @@ function tSummary() {
     </div>`;
 }
 
+/* ---------- nominal roll (HR records) ---------- */
+const rollNote = () => {
+  if (!rollStaff) return state?.institution.name ? "No nominal roll uploaded for this institution yet." : "Choose the institution first.";
+  const leave = rollStaff.filter(x => x.post === "On leave").length;
+  const when = rollInfo?.importedAt ? new Date(rollInfo.importedAt).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "";
+  return `${rollStaff.length - leave} at post, ${leave} on leave${when ? ", roll uploaded " + when : ""}.`;
+};
+
+// Loads the HR roll for the institution chosen on the open check, then refreshes whatever depends on it.
+async function refreshRoll() {
+  const name = state?.institution.name;
+  const id = docId;
+  rollStaff = null; rollInfo = null;
+  if (name) {
+    try {
+      const r = await loadRoll(name);
+      if (r) { rollInfo = r; rollStaff = prepareRoll(r.staff); }
+    } catch (e) { console.warn("Could not load the nominal roll (are the Firestore rules published?)", e); }
+  }
+  if (!state || id !== docId || name !== state.institution.name) return;   // the person moved on while it loaded
+  // Pre-fill the monitor's own total from the roll, but never overwrite a number they typed themselves
+  // (a number equal to the previous institution's roll total was pre-filled by us, so that one is replaced).
+  if (rollStaff && !readOnly && (!filled(state.institution.roll) || String(state.institution.roll) === String(lastRollTotal))) {
+    state.institution.roll = String(rollStaff.length); scheduleSave();
+    const box = main.querySelector('[data-path="institution.roll"]'); if (box) box.value = state.institution.roll;
+  }
+  lastRollTotal = rollStaff ? rollStaff.length : null;
+  const tot = $("roll-total"); if (tot) tot.textContent = rollStaff ? rollStaff.length : "—";
+  const note = $("roll-note"); if (note) note.textContent = rollNote();
+  if (tab === "attendance" || tab === "roll" || tab === "summary") renderTab();
+  updateTabDots();
+}
+
+function rollBadge(name) {
+  if (!rollStaff || !filled(name)) return "";
+  return matchStaff(name, rollStaff)
+    ? '<span class="roll-badge ok" title="Found on the nominal roll">On roll</span>'
+    : '<span class="roll-badge no" title="Not found on this institution\'s nominal roll">Not on roll</span>';
+}
+const rollDatalist = () => rollStaff
+  ? `<datalist id="roll-names">${rollStaff.map(x => `<option value="${esc(x.name)}">${esc(x.job)}</option>`).join("")}</datalist>` : "";
+
+function rollSummaryRows(r, i) {
+  const entered = r("Staff on nominal roll (as entered by monitor)", i.roll || "—");
+  if (!rollStaff) return entered;
+  const cc = crossCheck(state.attendance, rollStaff);
+  return entered + r("Staff on HR nominal roll", cc.total)
+    + r("Roll staff checked during this visit", `${cc.matched} of ${cc.total} (${pct(cc.coverage)})`)
+    + r("Roll staff not yet checked", cc.notChecked)
+    + r("Listed on the attendance sheet but not on the roll", cc.notOnRoll.length);
+}
+const rollFlags = flag => rollStaff ? flag(crossCheck(state.attendance, rollStaff).notOnRoll.length, "Listed staff not found on the nominal roll") : "";
+
+const statusTone = st => ({ "On time": "ok", "Late": "warn", "Absent": "no" })[st] || "info";
+
+function tRoll() {
+  const name = state.institution.name;
+  if (!name) return `<h3>Nominal roll</h3><p class="muted">Choose the institution on the Institution tab first.</p>`;
+  if (!rollStaff) return `<h3>Nominal roll</h3>
+    <div class="empty slim"><h3>No nominal roll for ${esc(name)} yet</h3>
+    <p class="muted">HR can upload the nominal roll on the <a href="#/roll">Nominal roll</a> page. Once it is there, you can cross-check every staff member here.</p></div>`;
+  const cc = crossCheck(state.attendance, rollStaff);
+  const tile = (n, label, cls = "neutral") => `<div class="flag ${cls}"><b>${n}</b><span>${label}</span></div>`;
+  const entered = Number(state.institution.roll);
+  const rows = rollStaff.map((x, n) => {
+    const row = cc.byStaff.get(n);
+    return `<tr data-search="${esc(`${x.name} ${x.no} ${x.job}`.toLowerCase())}">
+      <td class="num">${n + 1}</td><td>${esc(x.no)}</td><td>${esc(x.name)}</td><td>${esc(x.job)}</td>
+      <td><span class="roll-badge ${x.post === "On leave" ? "warn" : "info"}">${esc(x.post)}</span></td>
+      <td>${row ? `<span class="roll-badge ${statusTone(row.status)}">${esc(row.status || "Listed")}</span>` : '<span class="roll-badge no">Not yet checked</span>'}</td>
+      <td>${row ? "" : `<button type="button" class="btn small" data-roll-add="${n}">Add to attendance</button>`}</td></tr>`;
+  }).join("");
+  return `<h3>Nominal roll cross-check <small class="muted">${esc(name)}</small></h3>
+    <p class="muted small">Staff names are matched in any order (for example “Hannah Asamoah” and “ASAMOAH HANNAH”). Source: the HR nominal roll. ${esc(rollNote())}</p>
+    <div class="flags">
+      ${tile(cc.total, "Staff on the HR nominal roll")}
+      ${tile(cc.matched, `Checked during this visit (${pct(cc.coverage)})`, "")}
+      ${tile(cc.notChecked, "On the roll, not yet checked", cc.notChecked ? "warn" : "")}
+      ${tile(cc.notOnRoll.length, "Listed but not on the roll", cc.notOnRoll.length ? "raised" : "")}
+    </div>
+    ${Number.isFinite(entered) && filled(state.institution.roll) && entered !== cc.total ? `<p class="banner-ro">You entered <b>${entered}</b> as the total on the Institution tab, but the HR roll shows <b>${cc.total}</b>.</p>` : ""}
+    ${cc.notOnRoll.length ? `<p class="small"><b>Not found on the roll:</b> ${cc.notOnRoll.map(esc).join(", ")}. Check the spelling, or flag these staff to HR.</p>` : ""}
+    ${cc.duplicates.length ? `<p class="small"><b>Entered more than once:</b> ${cc.duplicates.map(esc).join(", ")}.</p>` : ""}
+    <div class="inline roll-tools">
+      <input id="roll-filter" type="search" placeholder="Filter the roll by name, employee no. or job…" autocomplete="off">
+      <button type="button" class="btn" data-roll="addall">Add all not yet checked (${cc.notChecked})</button>
+    </div>
+    <div class="scroll"><table class="grid-table stackable"><thead><tr><th>No.</th><th>Employee no.</th><th>Name</th><th>Job</th><th>On the roll as</th><th>This check</th><th></th></tr></thead>
+    <tbody id="roll-rows">${rows}</tbody></table></div>`;
+}
+
+function addStaffToAttendance(idxs) {
+  let added = 0;
+  for (const n of idxs) {
+    const x = rollStaff[n]; if (!x) continue;
+    let row = state.attendance.find(r => !filled(r.name));
+    if (!row) {
+      if (state.attendance.length >= LIMITS.attendance) { toast(`The attendance list is full (${LIMITS.attendance} rows).`); break; }
+      row = blankAtt(); state.attendance.push(row);
+    }
+    row.name = x.name; row.grade = x.job || ""; added++;
+  }
+  if (added) { scheduleSave(); updateTabDots(); renderTab(); toast(added === 1 ? "Added to the attendance list" : `${added} staff added to the attendance list`); }
+}
+
+async function addAllUnchecked() {
+  const cc = crossCheck(state.attendance, rollStaff);
+  const todo = rollStaff.map((_, n) => n).filter(n => !cc.byStaff.has(n));
+  if (!todo.length) return toast("Everyone on the roll is already on the attendance list.");
+  if (!(await modal({ title: `Add ${todo.length} staff?`, message: "They are added to the Attendance tab with their name and job. You then record who was present.", confirmLabel: "Add them" }))) return;
+  addStaffToAttendance(todo);
+}
+
+/* ---------- evidence of visit ---------- */
+const canAddEvidence = () => !!state && (!readOnly || isHr());
+const canDeleteEvidence = ev => !!state && (!readOnly || isHr() || ev.uploadedBy === user.uid);
+
+async function loadEvidence() {
+  const id = docId;
+  evidenceError = "";
+  try {
+    const q = collection(db, "inspections", id, "evidence");
+    const snap = await withCacheFallback(() => getDocs(q), () => getDocsFromCache(q));
+    if (id !== docId) return;
+    evidence = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (b.uploadedAt || 0) - (a.uploadedAt || 0));
+  } catch (err) {
+    console.error(err);
+    if (id !== docId) return;
+    evidence = []; evidenceError = err.code || err.message;
+  }
+  if (tab === "evidence") renderTab();
+  updateTabDots();
+}
+
+function tEvidence() {
+  if (evidence === null) { loadEvidence(); return `<h3>Evidence of visit</h3><p class="muted">Loading…</p>`; }
+  const when = t => new Date(t).toLocaleString(undefined, { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  const card = ev => `<figure class="ev-card">
+      <button type="button" class="ev-thumb${ev.kind === "pdf" ? " pdf" : ""}" data-ev-view="${esc(ev.id)}" aria-label="Open ${esc(ev.caption || ev.name || "evidence")}">
+        ${ev.kind === "pdf" ? "<span>PDF</span>" : `<img src="${esc(ev.data)}" alt="${esc(ev.caption || ev.category || "Evidence")}" loading="lazy">`}</button>
+      <figcaption>
+        <span class="pill">${esc(ev.category || "Other")}</span>
+        <p>${esc(ev.caption || ev.name || "")}</p>
+        <p class="muted small">${esc(ev.uploadedByName || "Unknown")} · ${esc(when(ev.uploadedAt || 0))} · ${esc(fmtSize(ev.size || 0))}</p>
+        ${canDeleteEvidence(ev) ? `<button type="button" class="btn small danger" data-ev-del="${esc(ev.id)}">Remove</button>` : ""}
+      </figcaption></figure>`;
+  const upload = canAddEvidence() ? `
+    <div class="grid">
+      <label>Type of evidence<select id="ev-cat">${opts(EV_CATEGORIES, EV_CATEGORIES[0], false)}</select></label>
+      <label>Caption or note (optional)<input id="ev-cap" type="text" placeholder="e.g. Register at 8:15 am, Block B" autocomplete="off"></label>
+    </div>
+    <div class="inline ev-actions">
+      <label class="btn primary file-btn">Take a photo<input id="ev-cam" type="file" accept="image/*" capture="environment" hidden></label>
+      <label class="btn file-btn">Choose photos or PDFs<input id="ev-file" type="file" accept="image/*,application/pdf" multiple hidden></label>
+      <span id="ev-status" class="muted small" role="status"></span>
+    </div>` : "";
+  return `<div data-keep>
+    <h3>Evidence of visit</h3>
+    <p class="muted small">Photos of the attendance register, the movement book, signed findings or staff on site, and short PDFs. Photos are shrunk automatically.
+      Up to ${EV_LIMITS.files} files per check, PDFs up to ${Math.round(EV_LIMITS.pdfBytes / 1024)} KB. ${readOnly && !isHr() ? "You can view the evidence but not add to it." : ""}</p>
+    ${evidenceError ? `<p class="error">Could not load evidence: ${esc(evidenceError)}. Check the Firestore rules are the latest version (see README).</p>` : ""}
+    ${upload}
+    ${evidence.length ? `<div class="ev-grid">${evidence.map(card).join("")}</div>` : `<div class="empty slim"><h3>No evidence uploaded yet</h3><p class="muted">${canAddEvidence() ? "Use the buttons above to add the first photo." : "Nothing has been added to this check yet."}</p></div>`}
+  </div>`;
+}
+
+async function uploadEvidence(files) {
+  if (!canAddEvidence() || !files.length) return;
+  const id = docId;
+  const cat = $("ev-cat")?.value || EV_CATEGORIES[0];
+  const cap = ($("ev-cap")?.value || "").trim();
+  let ok = 0;
+  for (const f of files) {
+    if (evidence.length >= EV_LIMITS.files) { toast(`Maximum of ${EV_LIMITS.files} files per check.`); break; }
+    const status = $("ev-status");
+    try {
+      if (status) status.textContent = `Preparing ${f.name || "photo"}…`;
+      const p = await prepareEvidenceFile(f);
+      if (status) status.textContent = "Saving…";
+      const rec = {
+        kind: p.kind, mime: p.mime, name: p.name, size: p.size, data: p.data, category: cat, caption: cap,
+        uploadedBy: user.uid, uploadedByName: user.displayName || user.email || "", uploadedAt: Date.now()
+      };
+      const ref = doc(collection(db, "inspections", id, "evidence"));
+      const write = setDoc(ref, rec);
+      const outcome = navigator.onLine ? await settle(write, 15000) : "pending";
+      if (outcome !== "synced") write.catch(err => { console.error(err); toast("An evidence file could not sync: " + (err.code || err.message)); });
+      if (id !== docId) return;
+      evidence.unshift({ id: ref.id, ...rec }); ok++;
+    } catch (err) {
+      console.error(err);
+      toast(err.code === "permission-denied" ? "Not allowed. Publish the latest firestore.rules (see README)." : (err.code ? "Could not save: " + err.code : err.message));
+    }
+  }
+  if (id !== docId) return;
+  if ($("ev-cap") && ok) $("ev-cap").value = "";
+  renderTab(); updateTabDots();
+  if (ok) toast(ok === 1 ? "Evidence added" : `${ok} files added`);
+}
+
+async function deleteEvidence(evId) {
+  if (!(await askConfirm("Remove this evidence?", "The file is deleted from this check. This cannot be undone.", "Remove"))) return;
+  try {
+    const del = deleteDoc(doc(db, "inspections", docId, "evidence", evId));
+    if (navigator.onLine) await settle(del); else del.catch(console.error);
+    evidence = evidence.filter(e => e.id !== evId);
+    renderTab(); updateTabDots(); toast("Evidence removed");
+  } catch (err) { toast("Could not remove: " + (err.code || err.message)); }
+}
+
+function viewEvidence(evId) {
+  const ev = evidence.find(e => e.id === evId);
+  if (!ev) return;
+  let url;
+  try { url = URL.createObjectURL(dataUrlToBlob(ev.data)); } catch { return toast("This file could not be opened."); }
+  const fileName = ev.name || (ev.kind === "pdf" ? "evidence.pdf" : "evidence.jpg");
+  const back = document.createElement("div");
+  back.className = "modal-back viewer";
+  back.innerHTML = `<div class="viewer-box" role="dialog" aria-modal="true">
+    <div class="viewer-bar"><div><b>${esc(ev.category || "Evidence")}</b><span class="muted small">${esc(ev.caption || ev.name || "")}</span></div>
+      <a class="btn small" href="${url}" download="${esc(fileName)}">Download</a><button type="button" class="btn small" data-v="close">Close</button></div>
+    ${ev.kind === "image" ? `<img src="${url}" alt="${esc(ev.caption || "Evidence")}">` : `<p class="muted">PDF files open in a new tab.</p><a class="btn primary" href="${url}" target="_blank" rel="noopener">Open PDF</a>`}</div>`;
+  const close = () => { document.removeEventListener("keydown", onKey); back.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000); };
+  const onKey = e => { if (e.key === "Escape") close(); };
+  back.addEventListener("click", e => { if (e.target === back || e.target.dataset.v === "close") close(); });
+  document.addEventListener("keydown", onKey);
+  document.body.appendChild(back);
+}
+
+/* ---------- Nominal roll page (#/roll) ---------- */
+let rollView = { inst: "", q: "" };
+
+async function showRollPage() {
+  await saveNow();
+  state = null; docId = null; readOnly = false;
+  main.innerHTML = '<p class="muted pad">Loading…</p>';
+  try { allRolls = await loadAllRolls(); }
+  catch (err) { console.error(err); allRolls = []; toast("Could not load the roll: " + (err.code || err.message)); }
+  renderRollPage();
+}
+
+const fmtDay = t => new Date(t).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+
+function renderRollPage() {
+  const rolls = allRolls || [];
+  const byKey = new Map(rolls.map(r => [r.key || r.id, r]));
+  const names = sortList([...new Set([...institutions, ...rolls.map(r => r.institution).filter(Boolean)])]);
+  const total = rolls.reduce((n, r) => n + (r.count || 0), 0);
+  const leave = rolls.reduce((n, r) => n + (r.onLeave || 0), 0);
+  const stamp = rolls.reduce((m, r) => Math.max(m, r.importedAt || 0), 0);
+  const lede = total
+    ? `${total} staff on ${rolls.length} institution rolls (${total - leave} at post, ${leave} on leave). Last updated ${fmtDay(stamp)}.`
+    : isHr() ? "No nominal roll has been uploaded yet. Import the HR workbook to get started." : "HR has not uploaded the nominal roll yet.";
+  const tr = names.map(n => {
+    const r = byKey.get(rollKey(n));
+    return `<tr><td><button type="button" class="link" data-roll-inst="${esc(n)}">${esc(n)}</button></td>
+      <td class="val">${r ? r.count : "—"}</td><td class="val">${r ? r.count - (r.onLeave || 0) : "—"}</td><td class="val">${r ? (r.onLeave || 0) : "—"}</td>
+      <td>${r ? esc(fmtDay(r.importedAt || 0)) : '<span class="muted">No roll uploaded</span>'}</td></tr>`;
+  }).join("");
+  main.innerHTML = `
+    <div class="page-head">
+      <div><h2>Nominal roll</h2><p class="muted">${esc(lede)}</p></div>
+      <div class="head-actions">
+        <a class="btn" href="#/">← All checks</a>
+        ${isHr() ? '<button type="button" class="btn primary" data-roll="import">Import nominal roll (.xlsx)</button><input id="roll-file" type="file" accept=".xlsx,.xls" hidden>' : ""}
+      </div>
+    </div>
+    <div class="panel">
+      <h3>Cross-check a staff member</h3>
+      <div class="grid">
+        <label>Institution<select id="roll-inst"><option value="">All institutions</option>${names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("")}</select></label>
+        <label>Name, employee number or job<input id="roll-q" type="search" placeholder="e.g. Mensah, or 1557315" autocomplete="off"></label>
+      </div>
+      <div id="roll-results"></div>
+    </div>
+    <div class="panel" style="margin-top:18px">
+      <h3>Staff on the roll, by institution</h3>
+      <div class="scroll"><table class="grid-table"><thead><tr><th>Institution</th><th>On the roll</th><th>At post</th><th>On leave</th><th>Roll updated</th></tr></thead>
+      <tbody>${tr}</tbody>${total ? `<tfoot><tr class="total"><td>All institutions</td><td class="val">${total}</td><td class="val">${total - leave}</td><td class="val">${leave}</td><td></td></tr></tfoot>` : ""}</table></div>
+    </div>`;
+  $("roll-inst").value = rollView.inst; $("roll-q").value = rollView.q;
+  renderRollResults();
+}
+
+function renderRollResults() {
+  const box = $("roll-results");
+  if (!box) return;
+  const q = rollView.q.trim().toLowerCase();
+  const inst = rollView.inst ? rollKey(rollView.inst) : "";
+  if (!q && !inst) { box.innerHTML = '<p class="muted small">Pick an institution, or type a name, to see the staff on the roll.</p>'; return; }
+  const rolls = (allRolls || []).filter(r => !inst || (r.key || r.id) === inst);
+  if (inst && !rolls.length) { box.innerHTML = `<p class="muted small">No roll has been uploaded for ${esc(rollView.inst)} yet.</p>`; return; }
+  const terms = q.split(/\s+/).filter(Boolean);
+  const hits = [];
+  for (const r of rolls) for (const x of r.staff || []) {
+    const hay = `${x.name} ${x.no} ${x.job}`.toLowerCase();
+    if (terms.every(t => hay.includes(t))) hits.push({ ...x, institution: r.institution });
+  }
+  const shown = hits.slice(0, 100);
+  box.innerHTML = `<p class="muted small">${hits.length} ${hits.length === 1 ? "match" : "matches"}${hits.length > shown.length ? `, showing the first ${shown.length}. Type more to narrow it down` : ""}.</p>
+    ${shown.length ? `<div class="scroll"><table class="grid-table"><thead><tr><th>Employee no.</th><th>Name</th><th>Job</th>${inst ? "" : "<th>Institution</th>"}<th>Status</th></tr></thead><tbody>
+      ${shown.map(x => `<tr><td>${esc(x.no)}</td><td>${esc(x.name)}</td><td>${esc(x.job)}</td>${inst ? "" : `<td>${esc(x.institution)}</td>`}
+        <td><span class="roll-badge ${x.post === "On leave" ? "warn" : "info"}">${esc(x.post)}</span></td></tr>`).join("")}</tbody></table></div>` : ""}`;
+}
+
+async function importRoll(file) {
+  if (!isHr()) return toast("Only HR can upload the nominal roll.");
+  if (typeof XLSX === "undefined") return toast("Excel library failed to load.");
+  let parsed;
+  try {
+    const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
+    parsed = parseRollWorkbook(XLSX, wb, institutions);
+  } catch (err) { console.error(err); return toast("Could not read that file: " + err.message); }
+  if (!parsed.sheets.length) return toast("No staff were found. Each sheet needs a FULL NAME column.");
+  const outside = parsed.sheets.filter(s => !s.inList).map(s => s.institution);
+  const message = [
+    `${parsed.total} staff on ${parsed.sheets.length} sheets (one sheet per institution).`,
+    outside.length ? `Not in the institution list yet: ${outside.join(", ")}. Add them with + Add on a check's Institution tab so monitors can pick them.` : "",
+    parsed.duplicates.length ? `${parsed.duplicates.length} employee numbers appear more than once (on one sheet twice, or on two sheets). Worth a look in the workbook.` : "",
+    "Only name, employee number, job and at-post/on-leave are saved. Bank, SSNIT, Ghana Card, date of birth and phone numbers are not.",
+    "This replaces any roll already saved for these institutions."
+  ].filter(Boolean).join("\n\n");
+  if (!(await modal({ title: "Import nominal roll?", message, confirmLabel: "Import" }))) return;
+  try {
+    await saveRolls(parsed.sheets, user, file.name);
+    allRolls = await loadAllRolls();
+    toast(`Imported ${parsed.total} staff`);
+  } catch (err) {
+    console.error(err);
+    toast(err.code === "permission-denied" ? "Not allowed: your account needs the hr role (see README)." : "Import failed: " + (err.code || err.message));
+  }
+  renderRollPage();
+}
+
+/* ---------- file pickers and autofill (change events) ---------- */
+main.addEventListener("change", e => {
+  const el = e.target;
+  if (el.id === "roll-file") { const f = el.files?.[0]; el.value = ""; if (f) importRoll(f); return; }
+  if (el.id === "ev-file" || el.id === "ev-cam") { const files = [...(el.files || [])]; el.value = ""; uploadEvidence(files); return; }
+  // Picking a name from the roll fills the grade with their job, if it is still empty
+  const m = (el.dataset.path || "").match(/^attendance\.(\d+)\.name$/);
+  if (m && rollStaff && state && !readOnly) {
+    const hit = matchStaff(el.value, rollStaff), row = state.attendance[m[1]];
+    if (hit?.job && row && !filled(row.grade)) {
+      row.grade = hit.job;
+      const g = main.querySelector(`[data-path="attendance.${m[1]}.grade"]`); if (g) g.value = row.grade;
+      scheduleSave();
+    }
+  }
+});
+
 /* ---------- events ---------- */
 main.addEventListener("input", e => {
   if (e.target.id === "filter") {
@@ -601,6 +1055,13 @@ main.addEventListener("input", e => {
     document.querySelectorAll("#cards .card").forEach(c => c.classList.toggle("hidden", !c.dataset.search.includes(term)));
     return;
   }
+  if (e.target.id === "roll-filter") {
+    const term = e.target.value.trim().toLowerCase();
+    document.querySelectorAll("#roll-rows tr").forEach(tr => tr.classList.toggle("hidden", !tr.dataset.search.includes(term)));
+    return;
+  }
+  if (e.target.id === "roll-q") { rollView.q = e.target.value; return renderRollResults(); }
+  if (e.target.id === "roll-inst") { rollView.inst = e.target.value; return renderRollResults(); }
   const el = e.target, path = el.dataset.path;
   if (el.dataset.multi && state) {
     const vals = [...main.querySelectorAll(`input[data-multi="${el.dataset.multi}"]:checked`)].map(x => x.value);
@@ -612,7 +1073,11 @@ main.addEventListener("input", e => {
   setByPath(state, path, el.value);
   if (el.tagName === "SELECT") el.dataset.val = el.value;
 
-  if (path === "institution.name") $("title").textContent = el.value || "Untitled check";
+  if (path === "institution.name") { $("title").textContent = el.value || "Untitled check"; refreshRoll(); }
+
+  // "On roll?" badge next to the name
+  const nm = path.match(/^attendance\.(\d+)\.name$/);
+  if (nm) { const cell = main.querySelector(`[data-rb="${nm[1]}"]`); if (cell) cell.innerHTML = rollBadge(el.value); }
 
   // Auto-suggest On time / Late from arrival time vs official start time
   const m = path.match(/^attendance\.(\d+)\.arrival$/);
@@ -634,7 +1099,7 @@ main.addEventListener("input", e => {
   scheduleSave();
 });
 
-main.addEventListener("click", e => {
+main.addEventListener("click", async e => {
   const t = e.target.closest("button");
   if (!t) return;
 
@@ -642,6 +1107,18 @@ main.addEventListener("click", e => {
   if (t.dataset.inst === "add") return addInstitution();
   if (t.dataset.inst === "del") return deleteInstitution();
   if (t.dataset.view) { dashView = t.dataset.view; return showDashboard(); }
+
+  if (t.dataset.roll === "use" && rollStaff) {
+    state.institution.roll = String(rollStaff.length);
+    const box = main.querySelector('[data-path="institution.roll"]'); if (box) box.value = state.institution.roll;
+    scheduleSave(); return toast("Roll total copied");
+  }
+  if (t.dataset.roll === "addall") return addAllUnchecked();
+  if (t.dataset.rollAdd !== undefined) return addStaffToAttendance([Number(t.dataset.rollAdd)]);
+  if (t.dataset.roll === "import") return $("roll-file")?.click();
+  if (t.dataset.rollInst !== undefined) { rollView.inst = t.dataset.rollInst; const sel = $("roll-inst"); if (sel) sel.value = rollView.inst; renderRollResults(); return $("roll-results")?.scrollIntoView({ behavior: "smooth", block: "start" }); }
+  if (t.dataset.evView) return viewEvidence(t.dataset.evView);
+  if (t.dataset.evDel) return deleteEvidence(t.dataset.evDel);
 
   if (t.dataset.action === "new") return createInspection();
   if (t.dataset.action === "delete") return deleteInspection(t.dataset.id);
@@ -659,7 +1136,7 @@ main.addEventListener("click", e => {
     if (state[k].length <= 1) return toast("At least one row must remain.");
     const row = state[k][n];
     const hasData = Object.values(row).some(v => String(v).trim() !== "");
-    if (hasData && !confirm("Remove this row and its data?")) return;
+    if (hasData && !(await askConfirm("Remove this row?", "The row and everything entered in it will be removed.", "Remove"))) return;
     state[k].splice(Number(n), 1);
     scheduleSave(); updateTabDots(); renderTab();
   }
@@ -697,7 +1174,7 @@ function exportXlsx() {
     ...ROLES.map(([k, l]) => [l, d.signoff[k].name, d.signoff[k].signature, d.signoff[k].date])]);
 
   add("Summary", [["Summary for this Institution"],
-    ["Institution", i.name], ["Date of check", i.date], ["Type of check", i.type], ["Staff on nominal roll", i.roll], [],
+    ["Institution", i.name], ["Date of check", i.date], ["Type of check", i.type], ["Staff on nominal roll (entered)", i.roll], ["Staff on HR nominal roll", rollStaff ? rollStaff.length : ""], [],
     ["Staff listed on attendance sheet", s.listed], ["Present on time", s.onTime], ["Present but late", s.late],
     ["Absent with approval", s.approved], ["Absent without approval", s.absent], ["Signed register but not physically present", s.signedNotPresent],
     ["Attendance rate", pct(s.attendanceRate)], ["Punctuality rate", pct(s.punctualityRate)], [],
@@ -706,6 +1183,62 @@ function exportXlsx() {
     ["Level", "Listed", "Present", "Late", "Absent (no approval)", "Attendance rate"],
     ...s.byLevel.map(x => [x.level, x.listed, x.present, x.late, x.absent, pct(x.rate)])]);
 
+  if (rollStaff) {
+    const cc = crossCheck(d.attendance, rollStaff);
+    add("Nominal Roll Check", [
+      ["Staff on HR nominal roll", cc.total], ["Checked during this visit", cc.matched], ["Not yet checked", cc.notChecked],
+      ["Listed but not on the roll", cc.notOnRoll.join("; ")], [],
+      ["No.", "Employee no.", "Name", "Job", "Roll status", "This check"],
+      ...rollStaff.map((st, n) => { const row = cc.byStaff.get(n); return [n + 1, st.no, st.name, st.job, st.post, row ? (row.status || "Listed") : "Not checked"]; })]);
+  }
   const safe = (i.name || "check").replace(/[^\w-]+/g, "_");
-  XLSX.writeFile(wb, `Attendance_Check_${safe}_${i.date || "undated"}.xlsx`);
+  return saveFile(wb, `Attendance_Check_${safe}_${i.date || "undated"}.xlsx`);
 }
+
+// Downloads from web apps are unreliable on iPhone (and often silent in Home Screen apps),
+// so there we hand the file to the share sheet (Save to Files, Mail, WhatsApp...). Elsewhere it's a normal download.
+async function saveFile(wb, filename) {
+  const type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  const blob = new Blob([XLSX.write(wb, { bookType: "xlsx", type: "array" })], { type });
+  if (isIOS && navigator.canShare) {
+    try {
+      const file = new File([blob], filename, { type });
+      if (navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: filename }); return; }
+    } catch (err) {
+      if (err && err.name === "AbortError") return;   // the person closed the share sheet
+      console.warn("Share failed, downloading instead", err);
+    }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 15000);
+}
+
+/* ---------- install as an app ---------- */
+let installEvent = null;
+window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); installEvent = e; $("install-btn").classList.remove("hidden"); });
+window.addEventListener("appinstalled", () => { installEvent = null; $("install-btn").classList.add("hidden"); });
+$("install-btn").addEventListener("click", async () => {
+  if (!installEvent) return;
+  installEvent.prompt();
+  await installEvent.userChoice;
+  installEvent = null; $("install-btn").classList.add("hidden");
+});
+
+// iPhone has no install button, so explain Add to Home Screen once.
+function showIosHint() {
+  let dismissed = false;
+  try { dismissed = localStorage.getItem("iosHintDismissed") === "1"; } catch { /* storage blocked */ }
+  $("ios-hint").classList.toggle("hidden", !(isIOS && !isStandalone && !isEmbeddedWebView && !dismissed));
+}
+$("ios-hint-close").addEventListener("click", () => {
+  $("ios-hint").classList.add("hidden");
+  try { localStorage.setItem("iosHintDismissed", "1"); } catch { /* storage blocked */ }
+});
+
+// Close the category dropdown when tapping elsewhere (iOS only reports taps on elements it considers clickable, so listen to touches too)
+const closeMulti = e => document.querySelectorAll("details.multi[open]").forEach(d => { if (!d.contains(e.target)) d.open = false; });
+document.addEventListener("click", closeMulti);
+document.addEventListener("touchstart", closeMulti, { passive: true });
