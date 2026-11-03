@@ -135,7 +135,8 @@ Monitors, leads and HR can all *read* the nominal roll; only HR can change it.
 2. **Import nominal roll (.xlsx)** and choose the HR workbook (one sheet per institution, like `CENTRAL_REGION_OFFICE_NOMINAL_ROLL_DATA_SEPTEMBER_2026.xlsx`).
    The app reads every sheet, shows what it found (staff per sheet, institutions not yet in the list, repeated employee numbers) and asks you to confirm.
    Importing again replaces the roll for the sheets in the file, so re-import when HR sends a new version.
-3. Sheets are matched to institutions by name, ignoring spaces and capitals (`BIRIWATECHNICAL` = `BIRIWA TECHNICAL`). A sheet with a new name is imported as its own institution; use **+ Add** on a check's Institution tab to put it in the dropdown.
+3. Sheets are matched to institutions by name, ignoring spaces and capitals (`BIRIWATECHNICAL` = `BIRIWA TECHNICAL`). Before saving, a window asks which institution each sheet is for. Matching sheets are pre-selected; a sheet called something else (such as `Sheet1` in a one-institution workbook) must be assigned to an institution from the list.
+4. HR can **Delete** the roll of any institution from the table on the Nominal roll page (for example one imported under the wrong name), then import it again.
 
 **Privacy:** only each person's **name, employee number, job and at-post / on-leave** are saved. Bank accounts, SSNIT and Ghana Card numbers, dates of birth and phone numbers never leave the HR workbook. Do not commit the workbook to GitHub: a GitHub Pages site is public. The roll lives in Firestore, behind login and the security rules.
 

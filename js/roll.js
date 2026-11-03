@@ -2,7 +2,7 @@
 // Only name, employee number, job and at-post/on-leave are stored (no bank, SSNIT, Ghana Card, date of birth or phone numbers).
 import { db } from "./firebase.js";
 import {
-  collection, doc, getDoc, getDocs, getDocFromCache, getDocsFromCache, writeBatch
+  collection, doc, getDoc, getDocs, getDocFromCache, getDocsFromCache, writeBatch, deleteDoc
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { rollKey } from "./roll-core.js";
 
@@ -45,4 +45,10 @@ export async function saveRolls(sheets, user, fileName) {
     });
   }
   await batch.commit();
+}
+
+// HR only (enforced by firestore.rules). Removes the roll saved for one institution.
+export async function deleteRoll(key) {
+  if (!navigator.onLine) throw new Error("You need to be online to delete a roll.");
+  await deleteDoc(doc(db, "roll", key));
 }

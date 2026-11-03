@@ -5,7 +5,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { computeSummary, pct, LEVELS, CHECKLIST } from "./calc.js";
 import { isIOS, isStandalone, isEmbeddedWebView } from "./env.js";
-import { loadRoll, loadAllRolls, saveRolls, parseRollWorkbook, prepareRoll, matchStaff, crossCheck, rollKey } from "./roll.js";
+import { loadRoll, loadAllRolls, saveRolls, deleteRoll, parseRollWorkbook, prepareRoll, matchStaff, crossCheck, rollKey } from "./roll.js";
 import { EV_LIMITS, EV_CATEGORIES, prepareEvidenceFile, dataUrlToBlob, fmtSize } from "./evidence.js";
 
 const $ = id => document.getElementById(id);
@@ -954,7 +954,8 @@ function renderRollPage() {
     const r = byKey.get(rollKey(n));
     return `<tr><td><button type="button" class="link" data-roll-inst="${esc(n)}">${esc(n)}</button></td>
       <td class="val">${r ? r.count : "—"}</td><td class="val">${r ? r.count - (r.onLeave || 0) : "—"}</td><td class="val">${r ? (r.onLeave || 0) : "—"}</td>
-      <td>${r ? esc(fmtDay(r.importedAt || 0)) : '<span class="muted">No roll uploaded</span>'}</td></tr>`;
+      <td>${r ? esc(fmtDay(r.importedAt || 0)) : '<span class="muted">No roll uploaded</span>'}</td>
+      ${isHr() ? `<td>${r ? `<button type="button" class="btn small danger" data-roll-del="${esc(r.key || r.id)}">Delete</button>` : ""}</td>` : ""}</tr>`;
   }).join("");
   main.innerHTML = `
     <div class="page-head">
@@ -974,8 +975,8 @@ function renderRollPage() {
     </div>
     <div class="panel" style="margin-top:18px">
       <h3>Staff on the roll, by institution</h3>
-      <div class="scroll"><table class="grid-table"><thead><tr><th>Institution</th><th>On the roll</th><th>At post</th><th>On leave</th><th>Roll updated</th></tr></thead>
-      <tbody>${tr}</tbody>${total ? `<tfoot><tr class="total"><td>All institutions</td><td class="val">${total}</td><td class="val">${total - leave}</td><td class="val">${leave}</td><td></td></tr></tfoot>` : ""}</table></div>
+      <div class="scroll"><table class="grid-table"><thead><tr><th>Institution</th><th>On the roll</th><th>At post</th><th>On leave</th><th>Roll updated</th>${isHr() ? "<th></th>" : ""}</tr></thead>
+      <tbody>${tr}</tbody>${total ? `<tfoot><tr class="total"><td>All institutions</td><td class="val">${total}</td><td class="val">${total - leave}</td><td class="val">${leave}</td><td></td>${isHr() ? "<td></td>" : ""}</tr></tfoot>` : ""}</table></div>
     </div>`;
   $("roll-inst").value = rollView.inst; $("roll-q").value = rollView.q;
   renderRollResults();
@@ -1002,6 +1003,55 @@ function renderRollResults() {
         <td><span class="roll-badge ${x.post === "On leave" ? "warn" : "info"}">${esc(x.post)}</span></td></tr>`).join("")}</tbody></table></div>` : ""}`;
 }
 
+// Asks which institution each sheet belongs to. A sheet whose name matches the institution list is pre-selected;
+// anything else (for example a workbook whose only sheet is called "Sheet1") must be assigned by the person importing.
+function chooseInstitutions(sheets, intro) {
+  return new Promise(resolve => {
+    const back = document.createElement("div");
+    back.className = "modal-back";
+    const rows = sheets.map((sh, i) => `<label>${esc(sh.sheet)} <span class="muted small">${sh.count} staff</span>
+      <select data-i="${i}"><option value="">Choose the institution…</option>
+        ${institutions.map(n => `<option value="${esc(n)}"${sh.inList && n === sh.institution ? " selected" : ""}>${esc(n)}</option>`).join("")}
+        ${sh.inList ? "" : `<option value="__keep">Keep “${esc(sh.sheet)}” as a new institution name</option>`}</select></label>`).join("");
+    back.innerHTML = `<div class="modal" role="dialog" aria-modal="true" style="max-height:88vh;overflow:auto">
+      <h3>Which institution is each sheet for?</h3>
+      <p class="muted">${esc(intro)}</p>
+      ${rows}
+      <p class="error hidden" id="m-err"></p>
+      <div class="modal-actions"><button type="button" class="btn" data-m="cancel">Cancel</button><button type="button" class="btn primary" data-m="ok">Import</button></div></div>`;
+    const done = v => { document.removeEventListener("keydown", onKey); back.remove(); resolve(v); };
+    const onKey = e => { if (e.key === "Escape") done(null); };
+    back.addEventListener("click", e => {
+      if (e.target === back || e.target.dataset.m === "cancel") return done(null);
+      if (e.target.dataset.m !== "ok") return;
+      const err = back.querySelector("#m-err");
+      const picks = [...back.querySelectorAll("select")].map(x => x.value);
+      if (picks.some(v => !v)) { err.textContent = "Choose an institution for every sheet."; return err.classList.remove("hidden"); }
+      const chosen = picks.map((v, i) => (v === "__keep" ? sheets[i].institution : v));
+      if (new Set(chosen.map(rollKey)).size !== chosen.length) { err.textContent = "Two sheets are set to the same institution. Each institution can have one roll."; return err.classList.remove("hidden"); }
+      done(sheets.map((sh, i) => ({ ...sh, institution: chosen[i], key: rollKey(chosen[i]) })));
+    });
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(back);
+    back.querySelector("select")?.focus();
+  });
+}
+
+async function removeRoll(key) {
+  if (!isHr()) return toast("Only HR can delete a nominal roll.");
+  const r = (allRolls || []).find(x => (x.key || x.id) === key);
+  if (!(await askConfirm(`Delete the roll for ${r?.institution || "this institution"}?`, `${r?.count ?? ""} staff will be removed from the nominal roll. Checks already recorded are not affected. You can import the roll again at any time.`, "Delete roll"))) return;
+  try {
+    await deleteRoll(key);
+    allRolls = await loadAllRolls();
+    toast("Roll deleted");
+  } catch (err) {
+    console.error(err);
+    toast(err.code === "permission-denied" ? "Not allowed: your account needs the hr role (see README)." : "Could not delete: " + (err.code || err.message));
+  }
+  renderRollPage();
+}
+
 async function importRoll(file) {
   if (!isHr()) return toast("Only HR can upload the nominal roll.");
   if (typeof XLSX === "undefined") return toast("Excel library failed to load.");
@@ -1011,17 +1061,16 @@ async function importRoll(file) {
     parsed = parseRollWorkbook(XLSX, wb, institutions);
   } catch (err) { console.error(err); return toast("Could not read that file: " + err.message); }
   if (!parsed.sheets.length) return toast("No staff were found. Each sheet needs a FULL NAME column.");
-  const outside = parsed.sheets.filter(s => !s.inList).map(s => s.institution);
   const message = [
-    `${parsed.total} staff on ${parsed.sheets.length} sheets (one sheet per institution).`,
-    outside.length ? `Not in the institution list yet: ${outside.join(", ")}. Add them with + Add on a check's Institution tab so monitors can pick them.` : "",
+    `${parsed.total} staff on ${parsed.sheets.length} ${parsed.sheets.length === 1 ? "sheet" : "sheets"}.`,
     parsed.duplicates.length ? `${parsed.duplicates.length} employee numbers appear more than once (on one sheet twice, or on two sheets). Worth a look in the workbook.` : "",
     "Only name, employee number, job and at-post/on-leave are saved. Bank, SSNIT, Ghana Card, date of birth and phone numbers are not.",
     "This replaces any roll already saved for these institutions."
   ].filter(Boolean).join("\n\n");
-  if (!(await modal({ title: "Import nominal roll?", message, confirmLabel: "Import" }))) return;
+  const sheets = await chooseInstitutions(parsed.sheets, message);
+  if (!sheets) return;
   try {
-    await saveRolls(parsed.sheets, user, file.name);
+    await saveRolls(sheets, user, file.name);
     allRolls = await loadAllRolls();
     toast(`Imported ${parsed.total} staff`);
   } catch (err) {
@@ -1117,6 +1166,7 @@ main.addEventListener("click", async e => {
   if (t.dataset.rollAdd !== undefined) return addStaffToAttendance([Number(t.dataset.rollAdd)]);
   if (t.dataset.roll === "import") return $("roll-file")?.click();
   if (t.dataset.rollInst !== undefined) { rollView.inst = t.dataset.rollInst; const sel = $("roll-inst"); if (sel) sel.value = rollView.inst; renderRollResults(); return $("roll-results")?.scrollIntoView({ behavior: "smooth", block: "start" }); }
+  if (t.dataset.rollDel !== undefined) return removeRoll(t.dataset.rollDel);
   if (t.dataset.evView) return viewEvidence(t.dataset.evView);
   if (t.dataset.evDel) return deleteEvidence(t.dataset.evDel);
 
