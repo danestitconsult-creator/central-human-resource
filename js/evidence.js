@@ -6,6 +6,11 @@ export const EV_CATEGORIES = [
   "Signed findings or report", "Staff on site", "Other"
 ];
 
+export const EV_CATEGORIES_EDTECH = [
+  "Photo of the visit", "Equipment in store", "Serial numbers / asset labels",
+  "Faulty or damaged equipment", "Allocation / issue register", "Signed findings or report", "Other"
+];
+
 const readDataUrl = file => new Promise((resolve, reject) => {
   const r = new FileReader();
   r.onload = () => resolve(r.result);

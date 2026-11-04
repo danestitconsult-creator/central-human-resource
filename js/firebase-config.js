@@ -1,7 +1,7 @@
 // Paste your Firebase web app config here.
 // Firebase console > Project settings > General > Your apps > Web app > SDK setup and configuration.
 // These values are NOT secrets: access is protected by Firebase Auth + Firestore security rules.
-export const firebaseConfig = {
+export firebaseConfig = {
   apiKey: "AIzaSyA37N8ahJ1nC2SAm3P7CKpm361foA_0w70",
   authDomain: "human-resource-ecc1a.firebaseapp.com",
   projectId: "human-resource-ecc1a",

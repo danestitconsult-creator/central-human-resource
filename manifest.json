@@ -42,6 +42,13 @@
       "description": "Start recording a new institution check",
       "url": "./#/new",
       "icons": [{ "src": "icons/icon-96.png", "sizes": "96x96", "type": "image/png" }]
+    },
+    {
+      "name": "New EdTech check",
+      "short_name": "EdTech check",
+      "description": "Start recording a new EdTech technology check",
+      "url": "./#/new/edtech",
+      "icons": [{ "src": "icons/icon-96.png", "sizes": "96x96", "type": "image/png" }]
     }
   ]
 }

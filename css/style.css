@@ -512,3 +512,10 @@ label.check input { width: 20px; height: 20px; flex: none; margin: 0; accent-col
 @media print { #roll-link { display: none !important; } }
 
 .mini b small { font: 600 12px var(--font-body); color: var(--muted); margin-left: 2px; }
+
+/* ---- departments (Human Resource / EdTech) ---- */
+.dept-tabs { margin-bottom: 18px; }
+.dept-tabs button .count { background: var(--primary-tint); color: var(--primary); border-radius: 99px; padding: 1px 8px; font-size: 12px; font-weight: 700; }
+.dept-tabs button.active .count { background: rgba(255,255,255,.22); color: #fff; }
+.dept-pill { align-self: center; }
+.chk-cell { white-space: nowrap; }

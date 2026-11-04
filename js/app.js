@@ -6,14 +6,20 @@ import {
 import { computeSummary, pct, LEVELS, CHECKLIST } from "./calc.js";
 import { isIOS, isStandalone, isEmbeddedWebView } from "./env.js";
 import { loadRoll, loadAllRolls, saveRolls, deleteRoll, parseRollWorkbook, prepareRoll, matchStaff, crossCheck, rollKey } from "./roll.js";
-import { EV_LIMITS, EV_CATEGORIES, prepareEvidenceFile, dataUrlToBlob, fmtSize } from "./evidence.js";
+import { EV_LIMITS, EV_CATEGORIES, EV_CATEGORIES_EDTECH, prepareEvidenceFile, dataUrlToBlob, fmtSize } from "./evidence.js";
+import { computeEdtech, FIXED_TOOLS, ITEM_TYPES, CONDITIONS, EDTECH_AREAS } from "./edtech-calc.js";
 
 const $ = id => document.getElementById(id);
 const main = $("main");
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
-const LIMITS = { attendance: 200, movement: 60, findings: 15 };
-const TABS = [
+const LIMITS = { attendance: 200, movement: 60, findings: 15, tools: 20, allocation: 200 };
+// Two monitoring departments share one app: Human Resource (the original attendance check, listed first) and EdTech.
+// A check with no "department" field was recorded before EdTech existed, so it is a Human Resource check.
+const DEPTS = [["hr", "Human Resource"], ["edtech", "EdTech"]];
+const deptOf = d => (d?.department === "edtech" ? "edtech" : "hr");
+const deptName = k => DEPTS.find(([x]) => x === k)[1];
+const TABS_HR = [
   ["institution", "Institution"],
   ["attendance", "Attendance"],
   ["roll", "Nominal roll"],
@@ -23,6 +29,17 @@ const TABS = [
   ["evidence", "Evidence"],
   ["summary", "Summary"]
 ];
+const TABS_ET = [
+  ["institution", "Institution"],
+  ["tools", "Technology tools"],
+  ["allocation", "Staff allocation"],
+  ["findings", "Findings"],
+  ["evidence", "Evidence"],
+  ["summary", "Summary"]
+];
+const tabsFor = d => (d === "edtech" ? TABS_ET : TABS_HR);
+const isEt = () => state?.department === "edtech";
+const homeHash = d => (d === "edtech" ? "#/edtech" : "#/");
 const CHECK_TYPES = ["Announced", "Unannounced"];
 
 const DEFAULT_INSTITUTIONS = [
@@ -51,7 +68,7 @@ const RATINGS = ["Good", "Fair", "Poor"];
 const AREAS = [["attendance", "Attendance"], ["punctuality", "Punctuality"], ["movement", "Staff movement control"], ["records", "Quality of records"]];
 const ROLES = [["lead", "Lead monitor"], ["member", "Monitoring team member"], ["head", "Head of institution (acknowledgement)"]];
 
-let user = null, state = null, docId = null, tab = "institution";
+let user = null, state = null, docId = null, tab = "institution", dashDept = "hr";
 let rollStaff = null, rollInfo = null, evidence = null, evidenceError = "", allRolls = null, lastRollTotal = null;   // HR nominal roll of the open check's institution, its evidence files, all rolls (Nominal roll page)
 let profile = { role: "monitor" }, readOnly = false, dashView = "mine";
 let saveTimer = null, dirty = false;
@@ -60,11 +77,29 @@ let saveTimer = null, dirty = false;
 const blankAtt = () => ({ name: "", level: "", grade: "", dept: "", signed: "", arrival: "", present: "", status: "", remarks: "" });
 const blankMov = () => ({ name: "", level: "", dept: "", left: "", reason: "", destination: "", authorisedBy: "", entered: "", expectedReturn: "", remarks: "" });
 const blankFind = () => ({ finding: "", level: "", evidence: "", action: "", officer: "", deadline: "" });
+const blankFindEt = () => ({ finding: "", evidence: "", action: "", officer: "", deadline: "" });
+const blankTool = (item = "") => ({ item, quantity: "", distributed: "", stores: "", condition: "", remarks: "" });
+const blankAlloc = (type = "") => ({ type, staff: "", dept: "", quantity: "", condition: "", remarks: "" });
 const rep = (n, f) => Array.from({ length: n }, f);
 
-function newInspection() {
+function newInspection(dept = "hr") {
+  if (dept === "edtech") {
+    return {
+      ownerId: user.uid,
+      ownerName: user.displayName || user.email || "",
+      department: "edtech",
+      createdAt: Date.now(), updatedAt: Date.now(),
+      institution: { name: "", location: "", head: "", date: "", type: "", team: "", arrived: "", departed: "" },
+      tools: [...FIXED_TOOLS.map(blankTool), blankTool()],    // desktops, laptops, SM1 tablets, then one row for other items
+      allocation: ITEM_TYPES.map(blankAlloc),
+      findings: rep(3, blankFindEt),
+      assessment: Object.fromEntries(EDTECH_AREAS.map(([k]) => [k, { rating: "", comment: "" }])),
+      signoff: Object.fromEntries(ROLES.map(([k]) => [k, { name: "", signature: "", date: "" }]))
+    };
+  }
   return {
     ownerId: user.uid,
+    department: "hr",
     ownerName: user.displayName || user.email || "",
     createdAt: Date.now(), updatedAt: Date.now(),
     institution: { name: "", location: "", head: "", date: "", type: "", team: "", arrived: "", departed: "", roll: "", startTime: "", categories: [] },
@@ -85,10 +120,27 @@ function parseCategories(v) {
   return STAFF_CATEGORIES.filter(c => list.some(x => String(x).trim().toLowerCase() === c.toLowerCase()));
 }
 
-function normalise(d) {
-  const base = newInspection();
+function normaliseEdtech(d) {
+  const base = newInspection("edtech");
+  const tools = (d.tools || []).map(r => ({ ...blankTool(), ...r }));
+  FIXED_TOOLS.forEach((item, n) => { tools[n] = { ...blankTool(), ...(tools[n] || {}), item }; });   // the first three rows are fixed
+  if (tools.length === FIXED_TOOLS.length) tools.push(blankTool());
   return {
-    ...base, ...d,
+    ...base, ...d, department: "edtech",
+    institution: { ...base.institution, ...(d.institution || {}) },
+    tools,
+    allocation: (d.allocation?.length ? d.allocation : base.allocation).map(r => ({ ...blankAlloc(), ...r })),
+    findings: (d.findings?.length ? d.findings : base.findings).map(r => ({ ...blankFindEt(), ...r })),
+    assessment: { ...base.assessment, ...(d.assessment || {}) },
+    signoff: { ...base.signoff, ...(d.signoff || {}) }
+  };
+}
+
+function normalise(d) {
+  if (deptOf(d) === "edtech") return normaliseEdtech(d);
+  const base = newInspection("hr");
+  return {
+    ...base, ...d, department: "hr",
     institution: { ...base.institution, ...(d.institution || {}), categories: parseCategories(d.institution?.categories) },
     attendance: (d.attendance?.length ? d.attendance : base.attendance)
       .map(r => ({ ...blankAtt(), ...r, signed: yn(r.signed), present: yn(r.present) })),
@@ -217,7 +269,12 @@ window.addEventListener("pagehide", () => { saveNow(); });
 /* ---------- user profile, roles, network ---------- */
 const isLead = () => profile.role === "lead";
 const isHr = () => profile.role === "hr";
-const canSeeAll = () => isLead() || isHr();   // leads and HR can open every monitor's check (read-only)
+const isEdtechRole = () => profile.role === "edtech";
+// Leads and HR can open every monitor's check (read-only). The EdTech role does the same, but for EdTech checks only.
+const canSeeAll = () => isLead() || isHr() || isEdtechRole();
+const canSeeDept = d => isLead() || isHr() || (isEdtechRole() && d === "edtech");
+const deptsFor = () => (isEdtechRole() ? DEPTS.filter(([k]) => k === "edtech") : DEPTS);
+const canEvidenceAny = () => isHr() || (isEdtechRole() && isEt());   // may add evidence to other monitors' checks
 
 async function loadProfile() {
   profile = { role: "monitor" };
@@ -240,7 +297,7 @@ async function loadProfile() {
   $("user-label").textContent = who;
   $("avatar").textContent = who.split(/[\s@.]+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join("") || "?";
   const badge = $("role-badge");
-  badge.textContent = isHr() ? "HR" : "Team lead";
+  badge.textContent = isHr() ? "HR" : isEdtechRole() ? "EdTech" : "Team lead";
   badge.classList.toggle("hidden", !canSeeAll());
 }
 
@@ -296,13 +353,17 @@ window.addEventListener("offline", updateNet);
 /* ---------- routing ---------- */
 function route() {
   if (!user) return;
-  if (location.hash === "#/new") {   // app-icon shortcut "New check"
-    history.replaceState(null, "", location.pathname + location.search + "#/");
-    return createInspection();
+  const h = location.hash;
+  if (h === "#/new" || h === "#/new/edtech") {   // app-icon shortcuts "New check" / "New EdTech check"
+    const dept = h === "#/new/edtech" || isEdtechRole() ? "edtech" : "hr";
+    history.replaceState(null, "", location.pathname + location.search + homeHash(dept));
+    return createInspection(dept);
   }
-  if (location.hash === "#/roll") return showRollPage();
-  const m = location.hash.match(/^#\/i\/(.+)$/);
-  m ? openEditor(m[1]) : showDashboard();
+  if (h === "#/roll") return showRollPage();
+  const m = h.match(/^#\/i\/(.+)$/);
+  if (m) return openEditor(m[1]);
+  dashDept = h === "#/edtech" || isEdtechRole() ? "edtech" : "hr";
+  showDashboard();
 }
 window.addEventListener("hashchange", async () => { await saveNow(); route(); });
 
@@ -313,7 +374,7 @@ initAuth(async u => {
   $("app-view").classList.toggle("hidden", !u);
   updateNet();
   if (u) { await loadProfile(); await loadInstitutions(); showIosHint(); route(); }
-  else { state = null; docId = null; profile = { role: "monitor" }; dashView = "mine"; allRolls = null; rollStaff = null; evidence = null; main.innerHTML = ""; }
+  else { state = null; docId = null; profile = { role: "monitor" }; dashView = "mine"; dashDept = "hr"; allRolls = null; rollStaff = null; evidence = null; main.innerHTML = ""; }
 });
 
 /* ---------- dashboard ---------- */
@@ -321,13 +382,21 @@ async function showDashboard() {
   await saveNow();
   state = null; docId = null; readOnly = false;
   main.innerHTML = '<p class="muted pad">Loading…</p>';
+  if (isEdtechRole()) dashDept = "edtech";
   const all = canSeeAll() && dashView === "all";
   try {
     const q = all
-      ? collection(db, "inspections")
+      ? (isEdtechRole() ? query(collection(db, "inspections"), where("department", "==", "edtech")) : collection(db, "inspections"))   // the rules only let the EdTech role read EdTech checks
       : query(collection(db, "inspections"), where("ownerId", "==", user.uid));
     const snap = await withCacheFallback(() => getDocs(q), () => getDocsFromCache(q));
-    const items = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    const everything = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    const counts = { hr: 0, edtech: 0 };
+    everything.forEach(i => counts[deptOf(i)]++);
+    const dept = dashDept, et = dept === "edtech";
+    const items = everything.filter(i => deptOf(i) === dept);
+
+    const deptTabs = `<nav class="tabs dept-tabs" aria-label="Department">${deptsFor().map(([k, l]) =>
+      `<button type="button" data-dtab="${k}" class="${k === dept ? "active" : ""}">${esc(l)}<span class="count">${counts[k]}</span></button>`).join("")}</nav>`;
 
     const toggle = canSeeAll() ? `<div class="seg inline">
         <button class="seg-btn ${all ? "" : "active"}" data-view="mine">My checks</button>
@@ -335,7 +404,35 @@ async function showDashboard() {
 
     const toneOf = r => (r === null ? "none" : r >= 0.9 ? "good" : r >= 0.75 ? "warn" : "bad");
 
+    const etIssues = e => Object.values(e.flags).reduce((a, b) => a + b, 0);
+    const cardEt = i => {
+      const own = i.ownerId === user.uid;
+      const e = computeEdtech(i);
+      const search = [i.institution?.name, i.institution?.location, i.ownerName].join(" ").toLowerCase();
+      return `<article class="card tone-${toneOf(e.accountedRate)}" data-search="${esc(search)}">
+        <div class="card-top">
+          <div><h3>${esc(i.institution?.name || "Untitled check")}</h3>
+            <p class="muted small">${esc(i.institution?.location || "No district chosen")}</p></div>
+          <div class="rate"><b>${pct(e.accountedRate)}</b><span>accounted for</span></div>
+        </div>
+        <div class="chips">
+          <span>${esc(i.institution?.date ? new Date(i.institution.date + "T00:00").toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "No date")}</span>
+          ${i.institution?.type ? `<span class="pill">${esc(i.institution.type)}</span>` : ""}
+          ${all ? `<span>by ${esc(own ? "you" : (i.ownerName || "unknown"))}</span>` : ""}
+        </div>
+        <div class="mini">
+          <div><b>${e.totalRecorded}</b>devices recorded</div>
+          <div><b>${e.totalAllocated}</b>allocated</div>
+          <div><b>${etIssues(e)}</b>to follow up</div>
+        </div>
+        <div class="row-actions">
+          <a class="btn small primary" href="#/i/${i.id}">${own ? "Open" : "View"}</a>
+          ${own ? `<button class="btn small danger" data-action="delete" data-id="${i.id}">Delete</button>` : ""}
+        </div></article>`;
+    };
+
     const card = i => {
+      if (et) return cardEt(i);
       const own = i.ownerId === user.uid;
       const sum = computeSummary(i);
       const search = [i.institution?.name, i.institution?.location, i.ownerName].join(" ").toLowerCase();
@@ -364,23 +461,24 @@ async function showDashboard() {
     const hr = new Date().getHours();
     const greeting = hr < 12 ? "Good morning" : hr < 17 ? "Good afternoon" : "Good evening";
     const first = (user.displayName || user.email || "").split(/[\s@]/)[0];
-    const rates = items.map(i => computeSummary(i).attendanceRate).filter(r => r !== null);
+    const rates = items.map(i => (et ? computeEdtech(i).accountedRate : computeSummary(i).attendanceRate)).filter(r => r !== null);
     const avg = rates.length ? rates.reduce((x, y) => x + y, 0) / rates.length : null;
     const places = new Set(items.map(i => i.institution?.name).filter(Boolean)).size;
     const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
     const lede = items.length
-      ? `${plural(items.length, "check")} ${all ? "from all monitors" : "recorded"} across ${plural(places, "institution")}.${avg !== null ? ` Average attendance ${pct(avg)}.` : ""}`
-      : "Record your first institution check to see results here.";
+      ? `${plural(items.length, "check")} ${all ? "from all monitors" : "recorded"} across ${plural(places, "institution")}.${avg !== null ? (et ? ` On average ${pct(avg)} of equipment is accounted for.` : ` Average attendance ${pct(avg)}.`) : ""}`
+      : `Record your first ${deptName(dept)} check to see results here.`;
 
     main.innerHTML = `
       <div class="page-head">
         <div><h2>${esc(greeting)}${first ? ", " + esc(first) : ""}</h2><p class="muted">${esc(lede)}</p></div>
-        <div class="head-actions">${toggle}<button class="btn primary" data-action="new">+ New check</button></div>
+        <div class="head-actions">${toggle}<button class="btn primary" data-action="new" data-dept="${dept}">+ New ${et ? "EdTech " : ""}check</button></div>
       </div>
+      ${deptTabs}
       ${all ? `<input id="filter" class="filter" type="search" placeholder="Filter by institution, district or monitor…">` : ""}
       ${items.length ? `<div class="cards" id="cards">${items.map(card).join("")}</div>`
-        : `<div class="empty"><h3>No checks yet</h3><p class="muted">Start a check when you arrive at an institution. It saves as you type.</p>
-           <button class="btn primary" data-action="new">+ Start your first check</button></div>`}`;
+        : `<div class="empty"><h3>No ${esc(deptName(dept))} checks yet</h3><p class="muted">${et ? "Start a check when you arrive at an institution to verify its technology tools and who holds them. It saves as you type." : "Start a check when you arrive at an institution. It saves as you type."}</p>
+           <button class="btn primary" data-action="new" data-dept="${dept}">+ Start your first check</button></div>`}`;
   } catch (err) {
     console.error(err);
     main.innerHTML = `<p class="error pad">Could not load checks: ${esc(err.code || err.message)}.<br>
@@ -388,10 +486,11 @@ async function showDashboard() {
   }
 }
 
-async function createInspection() {
+async function createInspection(dept = "hr") {
+  if (isEdtechRole()) dept = "edtech";
   try {
     const ref = doc(collection(db, "inspections"));   // id is generated locally, so this also works offline
-    const write = setDoc(ref, newInspection());
+    const write = setDoc(ref, newInspection(dept));
     if (navigator.onLine) await settle(write); else write.catch(console.error);
     location.hash = `#/i/${ref.id}`;
   } catch (err) { toast("Could not create check: " + (err.code || err.message)); }
@@ -420,10 +519,10 @@ async function openEditor(id) {
     const ref = doc(db, "inspections", id);
     const snap = await withCacheFallback(() => getDoc(ref), () => getDocFromCache(ref));
     const data = snap.exists() ? snap.data() : null;
-    if (!data || (data.ownerId !== user.uid && !canSeeAll())) {
+    if (!data || (data.ownerId !== user.uid && !canSeeDept(deptOf(data)))) {
       main.innerHTML = '<p class="pad">Check not found. <a href="#/">Back to list</a></p>'; return;
     }
-    docId = id; state = normalise(data); dirty = false; tab = "institution"; rollStaff = null; rollInfo = null; evidence = null; evidenceError = ""; lastRollTotal = null;
+    docId = id; state = normalise(data); dashDept = state.department; dirty = false; tab = "institution"; rollStaff = null; rollInfo = null; evidence = null; evidenceError = ""; lastRollTotal = null;
     readOnly = data.ownerId !== user.uid;   // leads and HR can view other monitors' checks but not edit them (HR can still add evidence)
     renderEditor();
     refreshRoll();
@@ -435,6 +534,17 @@ async function openEditor(id) {
 const filled = v => String(v ?? "").trim() !== "";
 function tabDone(k) {
   if (!state) return false;
+  const common = {
+    institution: () => filled(state.institution.name) && filled(state.institution.date),
+    findings: () => state.findings.some(r => filled(r.finding)),
+    evidence: () => (evidence || []).length > 0,
+    summary: () => false
+  };
+  if (isEt()) return (({
+    ...common,
+    tools: () => state.tools.some(r => filled(r.quantity)),
+    allocation: () => state.allocation.some(r => filled(r.staff))
+  })[k] || (() => false))();
   return ({
     institution: () => filled(state.institution.name) && filled(state.institution.date),
     attendance: () => state.attendance.some(r => filled(r.name)),
@@ -453,13 +563,14 @@ function updateTabDots() {
 function renderEditor() {
   main.innerHTML = `
     <div class="editor-head">
-      <a href="#/" class="btn small">← All checks</a>
+      <a href="${homeHash(state.department)}" class="btn small">← All checks</a>
       <h2 id="title">${esc(state.institution.name || "Untitled check")}</h2>
+      <span class="pill dept-pill">${esc(deptName(state.department))}</span>
       <span id="save-status" class="muted small">${readOnly ? "" : "All changes saved"}</span>
       <button class="btn small" data-action="export">Export Excel</button>
     </div>
-    ${readOnly ? `<p class="banner-ro">Read-only view of a check recorded by <b>${esc(state.ownerName || "another monitor")}</b>.${isHr() ? " As HR you can add evidence of the visit on the Evidence tab." : ""}</p>` : ""}
-    <nav class="tabs" id="tabs">${TABS.map(([k, l]) => `<button data-tab="${k}" class="${k === tab ? "active" : ""}${tabDone(k) ? " done" : ""}">${k === "summary" ? "" : '<i class="dot"></i>'}${l}</button>`).join("")}</nav>
+    ${readOnly ? `<p class="banner-ro">Read-only view of a check recorded by <b>${esc(state.ownerName || "another monitor")}</b>.${canEvidenceAny() ? ` As ${isHr() ? "HR" : "the EdTech team"} you can add evidence of the visit on the Evidence tab.` : ""}</p>` : ""}
+    <nav class="tabs" id="tabs">${tabsFor(state.department).map(([k, l]) => `<button data-tab="${k}" class="${k === tab ? "active" : ""}${tabDone(k) ? " done" : ""}">${k === "summary" ? "" : '<i class="dot"></i>'}${l}</button>`).join("")}</nav>
     <div id="tab-body" class="panel"></div>`;
   renderTab();
 }
@@ -467,7 +578,11 @@ function renderEditor() {
 function renderTab() {
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
   const body = $("tab-body");
-  body.innerHTML = { institution: tInstitution, attendance: tAttendance, movement: tMovement, records: tRecords, findings: tFindings, summary: tSummary, roll: tRoll, evidence: tEvidence }[tab]();
+  const views = isEt()
+    ? { institution: tInstitution, tools: tTools, allocation: tAllocation, findings: tFindings, summary: tSummaryEt, evidence: tEvidence }
+    : { institution: tInstitution, attendance: tAttendance, movement: tMovement, records: tRecords, findings: tFindings, summary: tSummary, roll: tRoll, evidence: tEvidence };
+  if (!views[tab]) tab = "institution";
+  body.innerHTML = views[tab]();
   // On phones each table row becomes a card; the CSS shows each field's column heading above it (see "stackable" in style.css)
   body.querySelectorAll("table.stackable").forEach(t => {
     const heads = [...t.querySelectorAll("thead th")].map(th => th.textContent.trim());
@@ -491,6 +606,7 @@ function tInstitution() {
     `<option value="">${placeholder}</option>` + list.map(o => `<option${o === val ? " selected" : ""}>${esc(o)}</option>`).join("") +
     (val && !list.includes(val) ? `<option value="${esc(val)}" selected>${esc(val)} (not in list)</option>` : "");
   const cats = i.categories || [];
+  const et = isEt();
   return `
   <section class="section">
     <h3>Institution <small>Where the check took place</small></h3>
@@ -515,10 +631,10 @@ function tInstitution() {
       ${f("Monitoring team members", "team")}
       ${f("Time team arrived", "arrived", "time")}
       ${f("Time team departed", "departed", "time")}
-      ${f("Official start time", "startTime", "time")}
+      ${et ? "" : f("Official start time", "startTime", "time")}
     </div>
   </section>
-  <section class="section">
+  ${et ? "" : `<section class="section">
     <h3>Staff <small>Who the check covers</small></h3>
     <div class="grid">
       ${f("Total staff on nominal roll (entered by monitor)", "roll", "number", 'inputmode="numeric" min="0"')}
@@ -539,7 +655,7 @@ function tInstitution() {
         </details>
       </div>
     </div>
-  </section>`;
+  </section>`}`;
 }
 
 function tAttendance() {
@@ -606,16 +722,17 @@ function tRecords() {
 }
 
 function tFindings() {
+  const et = isEt();
   const rows = state.findings.map((r, n) => `<tr>
     <td class="num">${n + 1}</td>
     <td>${inp(`findings.${n}.finding`, r.finding)}</td>
-    <td><select data-path="findings.${n}.level">${opts([...LEVELS, "All levels"], r.level)}</select></td>
+    ${et ? "" : `<td><select data-path="findings.${n}.level">${opts([...LEVELS, "All levels"], r.level)}</select></td>`}
     <td>${inp(`findings.${n}.evidence`, r.evidence)}</td>
     <td>${inp(`findings.${n}.action`, r.action)}</td>
     <td>${inp(`findings.${n}.officer`, r.officer)}</td>
     <td>${inp(`findings.${n}.deadline`, r.deadline, "date")}</td>
     <td><button class="icon" title="Remove row" data-del="findings.${n}">✕</button></td></tr>`).join("");
-  const areas = AREAS.map(([k, l]) => `<tr><td>${l}</td>
+  const areas = (et ? EDTECH_AREAS : AREAS).map(([k, l]) => `<tr><td>${l}</td>
     <td>${sel(`assessment.${k}.rating`, RATINGS, state.assessment[k].rating)}</td>
     <td>${inp(`assessment.${k}.comment`, state.assessment[k].comment)}</td></tr>`).join("");
   const sign = ROLES.map(([k, l]) => `<tr><td>${l}</td>
@@ -624,7 +741,7 @@ function tFindings() {
     <td>${inp(`signoff.${k}.date`, state.signoff[k].date, "date")}</td></tr>`).join("");
   return `<h3>Findings and recommendations</h3>
     <p class="muted small">Complete at the exit meeting and share a copy with the head of institution.</p>
-    <div class="scroll"><table class="grid-table stackable"><thead><tr><th>No.</th><th>Finding</th><th>Staff level affected</th><th>Evidence</th><th>Recommended action</th><th>Responsible officer</th><th>Deadline</th><th></th></tr></thead>
+    <div class="scroll"><table class="grid-table stackable"><thead><tr><th>No.</th><th>Finding</th>${et ? "" : "<th>Staff level affected</th>"}<th>Evidence</th><th>Recommended action</th><th>Responsible officer</th><th>Deadline</th><th></th></tr></thead>
     <tbody>${rows}</tbody></table></div>
     <button class="btn" data-add="findings">+ Add finding (${state.findings.length}/${LIMITS.findings})</button>
     <h3>Overall assessment</h3>
@@ -697,6 +814,143 @@ function tSummary() {
     </div>`;
 }
 
+/* ---------- EdTech department: technology tools, staff allocation, summary ---------- */
+const NUM = 'inputmode="numeric" min="0" step="1"';
+const etFlag = (n, label) => `<div class="flag${n > 0 ? " raised" : ""}"><b>${n}</b><span>${label}</span></div>`;
+const numOf = v => { const n = parseFloat(v); return Number.isFinite(n) && n > 0 ? n : 0; };
+
+// Per-row check on the tools sheet: Distributed + Stores should add up to Quantities
+function toolCheck(r) {
+  if (!filled(r.quantity) || !(filled(r.distributed) || filled(r.stores))) return "";
+  const gap = numOf(r.quantity) - numOf(r.distributed) - numOf(r.stores);
+  if (gap === 0) return '<span class="roll-badge ok" title="Distributed + Stores equals Quantities">Adds up</span>';
+  return gap > 0
+    ? `<span class="roll-badge warn" title="Distributed + Stores is less than Quantities">${gap} not accounted for</span>`
+    : `<span class="roll-badge no" title="Distributed + Stores is more than Quantities">${-gap} more than recorded</span>`;
+}
+
+function toolsFlags() {
+  const e = computeEdtech(state);
+  return `<div class="flag neutral"><b>${e.totalRecorded}</b><span>Desktops, laptops and tablets recorded</span></div>
+    ${etFlag(e.flags.notReconciled, "Lines where Distributed + Stores do not add up to Quantities")}
+    ${etFlag(e.flags.badTools, "Lines in poor, faulty or missing condition")}`;
+}
+
+function tTools() {
+  const rows = state.tools.map((r, n) => `<tr>
+    <td>${n < FIXED_TOOLS.length ? `<b>${esc(r.item)}</b>` : inp(`tools.${n}.item`, r.item, "text", 'placeholder="Others: name the item, e.g. Projector"')}</td>
+    <td>${inp(`tools.${n}.quantity`, r.quantity, "number", NUM)}</td>
+    <td>${inp(`tools.${n}.distributed`, r.distributed, "number", NUM)}</td>
+    <td>${inp(`tools.${n}.stores`, r.stores, "number", NUM)}</td>
+    <td>${sel(`tools.${n}.condition`, CONDITIONS, r.condition)}</td>
+    <td class="chk-cell" data-tc="${n}">${toolCheck(r)}</td>
+    <td>${inp(`tools.${n}.remarks`, r.remarks)}</td>
+    <td>${n < FIXED_TOOLS.length ? "" : `<button class="icon" title="Remove row" data-del="tools.${n}">✕</button>`}</td></tr>`).join("");
+  return `<h3>Institute technology tools</h3>
+    <p class="muted small"><b>Quantities</b> is what the records show. <b>Distributed</b> (in use by staff or classes) and <b>Stores</b> (kept in the store) should add up to it. Use Add row for any other item.</p>
+    <div class="scroll"><table class="grid-table stackable"><thead><tr>
+      <th>Items to verify</th><th>Quantities</th><th>Distributed</th><th>Stores</th><th>Condition</th><th>Check</th><th>Remarks</th><th></th>
+    </tr></thead><tbody>${rows}</tbody></table></div>
+    <button class="btn" data-add="tools">+ Add row (${state.tools.length}/${LIMITS.tools})</button>
+    <div class="flags" id="tools-flags" style="margin-top:18px">${toolsFlags()}</div>`;
+}
+
+function allocFooter() {
+  const e = computeEdtech(state);
+  const rows = e.byType.map(x => `<tr><td>${esc(x.type)}</td><td class="val">${x.qEntered ? x.quantity : "—"}</td><td class="val">${x.allocated}</td>
+    <td class="val">${x.qEntered ? x.unallocated : "—"}</td>
+    <td>${x.overAllocated ? '<span class="roll-badge no">More than recorded</span>' : x.allocMismatch ? `<span class="roll-badge warn">Distributed is ${x.distributed}</span>` : ""}</td></tr>`).join("");
+  return `<h4 style="margin:22px 0 10px">Allocated so far</h4>
+    <div class="scroll" style="max-height:none;margin-top:0"><table class="grid-table"><thead><tr><th>Type of item</th><th>Recorded</th><th>Allocated to staff</th><th>Not yet allocated</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function tAllocation() {
+  const rows = state.allocation.map((r, n) => `<tr>
+    <td class="num">${n + 1}</td>
+    <td>${sel(`allocation.${n}.type`, ITEM_TYPES, r.type)}</td>
+    <td>${inp(`allocation.${n}.staff`, r.staff, "text", 'list="roll-names" autocomplete="off"')}</td>
+    <td class="roll-cell" data-rb="${n}">${rollBadge(r.staff)}</td>
+    <td>${inp(`allocation.${n}.dept`, r.dept)}</td>
+    <td>${inp(`allocation.${n}.quantity`, r.quantity, "number", NUM)}</td>
+    <td>${sel(`allocation.${n}.condition`, CONDITIONS, r.condition)}</td>
+    <td>${inp(`allocation.${n}.remarks`, r.remarks)}</td>
+    <td><button class="icon" title="Remove row" data-del="allocation.${n}">✕</button></td></tr>`).join("");
+  return `<h3>Staff allocation</h3>
+    <p class="muted small">One row for each staff member holding equipment. ${rollStaff ? "Names are suggested from the HR nominal roll." : ""}</p>
+    <div class="scroll"><table class="grid-table stackable"><thead><tr>
+      <th>No.</th><th>Type of item</th><th>Staff name</th><th>On roll?</th><th>Department</th><th>Quantities</th><th>Condition</th><th>Remarks</th><th></th>
+    </tr></thead><tbody>${rows}</tbody></table></div>
+    <button class="btn" data-add="allocation">+ Add row (${state.allocation.length}/${LIMITS.allocation})</button>
+    <div id="alloc-footer">${allocFooter()}</div>${rollDatalist()}`;
+}
+
+function tSummaryEt() {
+  const e = computeEdtech(state), i = state.institution;
+  const toneOf = r => (r === null ? "none" : r >= 0.9 ? "good" : r >= 0.75 ? "warn" : "bad");
+  const r = (l, v) => `<tr><td>${l}</td><td class="val">${esc(v)}</td></tr>`;
+  const kpi = (label, rate, sub) => `<div class="kpi tone-${toneOf(rate)}">
+    <div class="ring-wrap"><div class="ring" style="--p:${rate === null ? 0 : Math.round(rate * 1000) / 10}"></div><span>${pct(rate)}</span></div>
+    <div><b>${label}</b><p class="muted small">${sub}</p></div></div>`;
+
+  const segs = [["Good", "good"], ["Fair", "info"], ["Poor", "warn"], ["Faulty", "bad"], ["Missing", "bad"]].map(([c, t]) => [c, e.conditionQty[c], t]);
+  const bar = e.ratedQty
+    ? segs.filter(x => x[1]).map(([l, n, t]) => `<i class="fill-${t}" style="flex:${n}" title="${l}: ${n}"></i>`).join("")
+    : '<i class="fill-none" style="flex:1"></i>';
+
+  const notOnRoll = rollStaff ? state.allocation.filter(a => filled(a.staff) && !matchStaff(a.staff, rollStaff)).length : null;
+  const f = e.flags;
+  const when = i.date ? new Date(i.date + "T00:00").toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" }) : "No date set";
+
+  const byItem = e.byType.map(x => `<tr><td>${esc(x.type)}</td><td>${x.qEntered ? x.quantity : "—"}</td><td>${x.dEntered ? x.distributed : "—"}</td><td>${x.stores || "—"}</td><td>${x.allocated}</td>
+    <td><div class="cellbar"><div class="bar"><i class="fill-${toneOf(x.allocationRate)}" style="flex:${x.allocationRate === null ? 0 : Math.min(x.allocationRate, 1)}"></i><i style="flex:${x.allocationRate === null ? 1 : Math.max(1 - x.allocationRate, 0)};background:transparent;min-width:0"></i></div><span>${pct(x.allocationRate)}</span></div></td></tr>`).join("");
+
+  return `<div class="sum-head">
+      <div><h3>${esc(i.name || "Untitled check")}</h3>
+        <p class="muted">${esc([i.location, when, i.type].filter(Boolean).join(", "))}</p></div>
+      <button class="btn small" data-action="print">Print summary</button>
+    </div>
+
+    <div class="kpis">
+      ${kpi("Accounted for", e.accountedRate, `${e.accountedQty} of ${e.qtyTotal} items are distributed or in stores`)}
+      ${kpi("Allocated to staff", e.allocationRate, `${e.totalAllocated} of ${e.totalRecorded} desktops, laptops and tablets`)}
+      ${kpi("In good condition", e.goodRate, `${e.goodQty} of ${e.ratedQty} items rated Good`)}
+    </div>
+
+    <div class="dist">
+      <h4>Condition of the ${e.ratedQty} items rated</h4>
+      <div class="bar">${bar}</div>
+      <ul class="legend">${segs.map(([l, n, t]) => `<li><i class="fill-${t}"></i>${l} <b>${n}</b></li>`).join("")}</ul>
+    </div>
+
+    <h4 style="margin-bottom:10px">Needs attention</h4>
+    <div class="flags">
+      ${etFlag(f.notReconciled, "Lines where Distributed + Stores do not add up")}
+      ${etFlag(f.overAllocated, "Item types allocated beyond the quantity recorded")}
+      ${etFlag(f.allocMismatch, "Item types where Distributed differs from the staff list")}
+      ${etFlag(f.badTools, "Tool lines in poor, faulty or missing condition")}
+      ${etFlag(f.badAlloc, "Allocated items in poor, faulty or missing condition")}
+      ${etFlag(f.noName, "Allocation rows with no staff name")}
+      ${etFlag(f.noType, "Allocation rows with no item type")}
+      ${notOnRoll === null ? "" : etFlag(notOnRoll, "Staff holding equipment who are not on the nominal roll")}
+    </div>
+
+    <div class="two-col">
+      <table class="grid-table"><tbody>
+        <tr class="sec"><td colspan="2">Institution</td></tr>
+        ${r("Name of institute", i.name || "—")}${r("Location / district", i.location || "—")}${r("Head of institution", i.head || "—")}
+        <tr class="sec"><td colspan="2">Technology tools</td></tr>
+        ${r("Total number of desktop computers", e.desktop.quantity)}${r("Total number of laptop computers", e.laptop.quantity)}${r("Total number of SM1 tablets", e.tablet.quantity)}
+        ${r("Others", e.others || "—")}
+        <tr class="sec"><td colspan="2">Allocated to staff</td></tr>
+        ${r("Total number of desktop computers allocated", e.desktop.allocated)}${r("Total number of laptop computers allocated", e.laptop.allocated)}${r("Total number of SM1 tablets allocated", e.tablet.allocated)}
+        ${r("Others allocated", e.other.allocated)}
+      </tbody></table>
+      <div><h4 style="margin-bottom:10px">By type of item</h4>
+      <div class="scroll" style="max-height:none;margin-top:0"><table class="grid-table"><thead><tr><th>Item</th><th>Recorded</th><th>Distributed</th><th>Stores</th><th>Allocated</th><th>Allocation rate</th></tr></thead><tbody>${byItem}</tbody></table></div>
+      <p class="muted small">Allocation rate is the number allocated to staff divided by the quantity recorded. A dash means that figure has not been entered yet.</p></div>
+    </div>`;
+}
+
 /* ---------- nominal roll (HR records) ---------- */
 const rollNote = () => {
   if (!rollStaff) return state?.institution.name ? "No nominal roll uploaded for this institution yet." : "Choose the institution first.";
@@ -719,14 +973,14 @@ async function refreshRoll() {
   if (!state || id !== docId || name !== state.institution.name) return;   // the person moved on while it loaded
   // Pre-fill the monitor's own total from the roll, but never overwrite a number they typed themselves
   // (a number equal to the previous institution's roll total was pre-filled by us, so that one is replaced).
-  if (rollStaff && !readOnly && (!filled(state.institution.roll) || String(state.institution.roll) === String(lastRollTotal))) {
+  if (rollStaff && !readOnly && !isEt() && (!filled(state.institution.roll) || String(state.institution.roll) === String(lastRollTotal))) {
     state.institution.roll = String(rollStaff.length); scheduleSave();
     const box = main.querySelector('[data-path="institution.roll"]'); if (box) box.value = state.institution.roll;
   }
   lastRollTotal = rollStaff ? rollStaff.length : null;
   const tot = $("roll-total"); if (tot) tot.textContent = rollStaff ? rollStaff.length : "—";
   const note = $("roll-note"); if (note) note.textContent = rollNote();
-  if (tab === "attendance" || tab === "roll" || tab === "summary") renderTab();
+  if (tab === "attendance" || tab === "roll" || tab === "summary" || tab === "allocation") renderTab();
   updateTabDots();
 }
 
@@ -811,8 +1065,9 @@ async function addAllUnchecked() {
 }
 
 /* ---------- evidence of visit ---------- */
-const canAddEvidence = () => !!state && (!readOnly || isHr());
-const canDeleteEvidence = ev => !!state && (!readOnly || isHr() || ev.uploadedBy === user.uid);
+const evCats = () => (isEt() ? EV_CATEGORIES_EDTECH : EV_CATEGORIES);
+const canAddEvidence = () => !!state && (!readOnly || canEvidenceAny());
+const canDeleteEvidence = ev => !!state && (!readOnly || canEvidenceAny() || ev.uploadedBy === user.uid);
 
 async function loadEvidence() {
   const id = docId;
@@ -845,7 +1100,7 @@ function tEvidence() {
       </figcaption></figure>`;
   const upload = canAddEvidence() ? `
     <div class="grid">
-      <label>Type of evidence<select id="ev-cat">${opts(EV_CATEGORIES, EV_CATEGORIES[0], false)}</select></label>
+      <label>Type of evidence<select id="ev-cat">${opts(evCats(), evCats()[0], false)}</select></label>
       <label>Caption or note (optional)<input id="ev-cap" type="text" placeholder="e.g. Register at 8:15 am, Block B" autocomplete="off"></label>
     </div>
     <div class="inline ev-actions">
@@ -855,8 +1110,8 @@ function tEvidence() {
     </div>` : "";
   return `<div data-keep>
     <h3>Evidence of visit</h3>
-    <p class="muted small">Photos of the attendance register, the movement book, signed findings or staff on site, and short PDFs. Photos are shrunk automatically.
-      Up to ${EV_LIMITS.files} files per check, PDFs up to ${Math.round(EV_LIMITS.pdfBytes / 1024)} KB. ${readOnly && !isHr() ? "You can view the evidence but not add to it." : ""}</p>
+    <p class="muted small">${isEt() ? "Photos of equipment in store, serial numbers and asset labels, faulty items, the allocation register or signed findings, and short PDFs." : "Photos of the attendance register, the movement book, signed findings or staff on site, and short PDFs."} Photos are shrunk automatically.
+      Up to ${EV_LIMITS.files} files per check, PDFs up to ${Math.round(EV_LIMITS.pdfBytes / 1024)} KB. ${readOnly && !canEvidenceAny() ? "You can view the evidence but not add to it." : ""}</p>
     ${evidenceError ? `<p class="error">Could not load evidence: ${esc(evidenceError)}. Check the Firestore rules are the latest version (see README).</p>` : ""}
     ${upload}
     ${evidence.length ? `<div class="ev-grid">${evidence.map(card).join("")}</div>` : `<div class="empty slim"><h3>No evidence uploaded yet</h3><p class="muted">${canAddEvidence() ? "Use the buttons above to add the first photo." : "Nothing has been added to this check yet."}</p></div>`}
@@ -866,7 +1121,7 @@ function tEvidence() {
 async function uploadEvidence(files) {
   if (!canAddEvidence() || !files.length) return;
   const id = docId;
-  const cat = $("ev-cat")?.value || EV_CATEGORIES[0];
+  const cat = $("ev-cat")?.value || evCats()[0];
   const cap = ($("ev-cap")?.value || "").trim();
   let ok = 0;
   for (const f of files) {
@@ -1125,8 +1380,14 @@ main.addEventListener("input", e => {
   if (path === "institution.name") { $("title").textContent = el.value || "Untitled check"; refreshRoll(); }
 
   // "On roll?" badge next to the name
-  const nm = path.match(/^attendance\.(\d+)\.name$/);
-  if (nm) { const cell = main.querySelector(`[data-rb="${nm[1]}"]`); if (cell) cell.innerHTML = rollBadge(el.value); }
+  const nm = path.match(/^attendance\.(\d+)\.name$|^allocation\.(\d+)\.staff$/);
+  if (nm) { const cell = main.querySelector(`[data-rb="${nm[1] ?? nm[2]}"]`); if (cell) cell.innerHTML = rollBadge(el.value); }
+
+  // EdTech: live "adds up" check on each tools row, and the running totals under the tables
+  const tm = path.match(/^tools\.(\d+)\./);
+  if (tm) { const c = main.querySelector(`[data-tc="${tm[1]}"]`); if (c) c.innerHTML = toolCheck(state.tools[tm[1]]); }
+  if (path.startsWith("tools.") && $("tools-flags")) $("tools-flags").innerHTML = toolsFlags();
+  if ((path.startsWith("allocation.") || path.startsWith("tools.")) && $("alloc-footer")) $("alloc-footer").innerHTML = allocFooter();
 
   // Auto-suggest On time / Late from arrival time vs official start time
   const m = path.match(/^attendance\.(\d+)\.arrival$/);
@@ -1156,6 +1417,12 @@ main.addEventListener("click", async e => {
   if (t.dataset.inst === "add") return addInstitution();
   if (t.dataset.inst === "del") return deleteInstitution();
   if (t.dataset.view) { dashView = t.dataset.view; return showDashboard(); }
+  if (t.dataset.dtab) {   // Human Resource / EdTech switch on the dashboard
+    if (!deptsFor().some(([k]) => k === t.dataset.dtab)) return;
+    const target = homeHash(t.dataset.dtab);
+    if (location.hash === target || (target === "#/" && !location.hash)) { dashDept = t.dataset.dtab; return showDashboard(); }
+    location.hash = target; return;
+  }
 
   if (t.dataset.roll === "use" && rollStaff) {
     state.institution.roll = String(rollStaff.length);
@@ -1170,7 +1437,7 @@ main.addEventListener("click", async e => {
   if (t.dataset.evView) return viewEvidence(t.dataset.evView);
   if (t.dataset.evDel) return deleteEvidence(t.dataset.evDel);
 
-  if (t.dataset.action === "new") return createInspection();
+  if (t.dataset.action === "new") return createInspection(t.dataset.dept || dashDept);
   if (t.dataset.action === "delete") return deleteInspection(t.dataset.id);
   if (t.dataset.action === "print") return window.print();
   if (t.dataset.action === "export") return exportXlsx();
@@ -1178,14 +1445,14 @@ main.addEventListener("click", async e => {
   if (t.dataset.add) {
     const k = t.dataset.add;
     if (state[k].length >= LIMITS[k]) return toast(`Maximum of ${LIMITS[k]} rows reached.`);
-    state[k].push({ attendance: blankAtt, movement: blankMov, findings: blankFind }[k]());
+    state[k].push({ attendance: blankAtt, movement: blankMov, findings: isEt() ? blankFindEt : blankFind, tools: blankTool, allocation: blankAlloc }[k]());
     scheduleSave(); updateTabDots(); return renderTab();
   }
   if (t.dataset.del) {
     const [k, n] = t.dataset.del.split(".");
     if (state[k].length <= 1) return toast("At least one row must remain.");
     const row = state[k][n];
-    const hasData = Object.values(row).some(v => String(v).trim() !== "");
+    const hasData = Object.entries(row).some(([key, v]) => key !== "type" && String(v).trim() !== "");   // a pre-selected item type alone is not data
     if (hasData && !(await askConfirm("Remove this row?", "The row and everything entered in it will be removed.", "Remove"))) return;
     state[k].splice(Number(n), 1);
     scheduleSave(); updateTabDots(); renderTab();
@@ -1193,8 +1460,63 @@ main.addEventListener("click", async e => {
 });
 
 /* ---------- Excel export ---------- */
+function exportEdtechXlsx() {
+  const d = state, i = d.institution, e = computeEdtech(d);
+  const wb = XLSX.utils.book_new();
+  const add = (name, aoa) => XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), name);
+  const f = e.flags;
+
+  add("Institution Details", [["Field", "Entry"],
+    ["Name of institution", i.name], ["Location / district", i.location], ["Head of institution", i.head],
+    ["Date of check", i.date], ["Type of check", i.type], ["Monitoring team members", i.team],
+    ["Time team arrived / departed", `${i.arrived} / ${i.departed}`]]);
+
+  add("Institute Technology Tools", [["NAME OF INSTITUTE:", i.name], ["Items to Verify", "Quantities", "Distributed", "Stores", "Condition", "Remarks"],
+    ...d.tools.filter((r, n) => n < FIXED_TOOLS.length || [r.item, r.quantity, r.distributed, r.stores, r.condition, r.remarks].some(filled))
+      .map(r => [r.item, r.quantity, r.distributed, r.stores, r.condition, r.remarks])]);
+
+  add("Staff Allocation", [["Type of Item", "Staff Name", "Department", "Quantities", "Condition", "Remarks"],
+    ...d.allocation.filter(r => [r.staff, r.quantity, r.condition, r.remarks].some(filled))
+      .map(r => [r.type, r.staff, r.dept, r.quantity, r.condition, r.remarks])]);
+
+  add("Findings", [["NO", "FINDING", "EVIDENCE", "RECOMMENDED ACTION", "RESPONSIBLE OFFICER", "DEADLINE"],
+    ...d.findings.filter(r => filled(r.finding)).map((r, n) => [n + 1, r.finding, r.evidence, r.action, r.officer, r.deadline]),
+    [], ["Overall assessment"], ["Area", "Rating", "Comment"],
+    ...EDTECH_AREAS.map(([k, l]) => [l, d.assessment[k].rating, d.assessment[k].comment]),
+    [], ["Sign-off"], ["Role", "Name", "Signature", "Date"],
+    ...ROLES.map(([k, l]) => [l, d.signoff[k].name, d.signoff[k].signature, d.signoff[k].date])]);
+
+  add("Summary", [
+    ["NAME OF INSTITUTE", i.name],
+    ["TOTAL NUMBER OF DESKTOP COMPUTERS", e.desktop.quantity],
+    ["TOTAL NUMBER OF LAPTOP COMPUTERS", e.laptop.quantity],
+    ["TOTAL NUMBER OF SM1 TABLETS", e.tablet.quantity],
+    ["TOTAL NUMBER OF DESKTOP COMPUTERS ALLOCATED", e.desktop.allocated],
+    ["TOTAL NUMBER OF LAPTOP COMPUTERS ALLOCATED", e.laptop.allocated],
+    ["TOTAL NUMBER OF SM1 TABLETS ALLOCATED", e.tablet.allocated],
+    ["OTHERS", e.others], [],
+    ["Date of check", i.date], ["Type of check", i.type], [],
+    ["Items accounted for (distributed or in stores)", pct(e.accountedRate)],
+    ["Desktops, laptops and tablets allocated to staff", pct(e.allocationRate)],
+    ["Items in good condition", pct(e.goodRate)], [],
+    ["Needs attention"],
+    ["Lines where Distributed + Stores do not add up", f.notReconciled],
+    ["Item types allocated beyond the quantity recorded", f.overAllocated],
+    ["Item types where Distributed differs from the staff list", f.allocMismatch],
+    ["Tool lines in poor, faulty or missing condition", f.badTools],
+    ["Allocated items in poor, faulty or missing condition", f.badAlloc],
+    ["Allocation rows with no staff name", f.noName],
+    ["Allocation rows with no item type", f.noType], [],
+    ["Item", "Recorded", "Distributed", "Stores", "Allocated", "Not yet allocated", "Allocation rate"],
+    ...e.byType.map(x => [x.type, x.qEntered ? x.quantity : "", x.dEntered ? x.distributed : "", x.stores, x.allocated, x.qEntered ? x.unallocated : "", pct(x.allocationRate)])]);
+
+  const safe = (i.name || "check").replace(/[^\w-]+/g, "_");
+  return saveFile(wb, `EdTech_Check_${safe}_${i.date || "undated"}.xlsx`);
+}
+
 function exportXlsx() {
   if (typeof XLSX === "undefined") return toast("Excel library failed to load.");
+  if (isEt()) return exportEdtechXlsx();
   const d = state, i = d.institution, s = computeSummary(d);
   const wb = XLSX.utils.book_new();
   const add = (name, aoa) => XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), name);
