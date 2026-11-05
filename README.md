@@ -1,8 +1,10 @@
 # Monitoring Checks (Firebase + GitHub Pages)
 
-A web version of the *Staff Attendance and Movement Checks* workbook. Monitors log in, record each institution check
-(Institution details, Attendance, Movement log, Records checklist, Findings, Summary), and the Summary is calculated live,
-exactly like the Excel sheet. Data is saved automatically to Firestore, and each check can be exported back to Excel.
+A web app for the monitoring the directorate does across several aspects of its institutions. Each department has its own
+check: **Human Resource** (the Staff Attendance and Movement Checks workbook: Institution details, Attendance, Movement log,
+Leave, Records checklist, Findings, Summary) and **EdTech** (the EdTech Monitoring workbook: technology tools, staff
+allocation, findings, summary). Monitors log in and record each institution check, and the Summary is calculated live,
+exactly like the Excel sheets. Data is saved automatically to Firestore, and each check can be exported back to Excel.
 
 - **Hosting:** GitHub Pages (static files, no build step)
 - **Login / account creation:** Firebase Authentication (email + password, Google, password reset)
