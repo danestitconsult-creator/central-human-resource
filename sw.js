@@ -2,12 +2,12 @@
 // - Your own files: network first (so deployments show up immediately), cache as fallback.
 // - Pinned libraries and fonts (Firebase SDK, Excel export, Google Fonts): cache first.
 // - Firebase Auth / Firestore traffic is never touched here; Firestore has its own offline cache.
-const CACHE = "amc-v5";
+const CACHE = "amc-v7";
 const SHELL = [
   "./", "index.html", "manifest.json", "favicon.ico",
   "css/style.css",
   "js/app.js", "js/auth.js", "js/calc.js", "js/env.js", "js/firebase.js", "js/firebase-config.js",
-  "js/roll.js", "js/roll-core.js", "js/evidence.js", "js/edtech-calc.js",
+  "js/roll.js", "js/roll-core.js", "js/evidence.js", "js/edtech-calc.js", "js/avatar.js", "icons/ghana-tvet-logo.png", "icons/ghana-tvet-logo-160.png",
   "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png"
 ];
 const CDN = ["www.gstatic.com", "fonts.gstatic.com", "fonts.googleapis.com", "cdnjs.cloudflare.com"];

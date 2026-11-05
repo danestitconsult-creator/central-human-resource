@@ -519,3 +519,38 @@ label.check input { width: 20px; height: 20px; flex: none; margin: 0; accent-col
 .dept-tabs button.active .count { background: rgba(255,255,255,.22); color: #fff; }
 .dept-pill { align-self: center; }
 .chk-cell { white-space: nowrap; }
+
+
+/* ---- Ghana TVET Service branding ---- */
+.org-logo { display: block; flex: none; border-radius: 50%; background: #fff; padding: 2px; box-shadow: 0 1px 6px rgba(0,0,0,.25); object-fit: contain; }
+.org-logo.big { padding: 4px; box-shadow: 0 4px 18px rgba(0,0,0,.3); }
+.brand span, .org-row span { display: flex; flex-direction: column; line-height: 1.2; }
+.brand small, .org-row small { font: 500 11px var(--font-body, inherit); color: rgba(255,255,255,.75); letter-spacing: .02em; margin-top: 2px; }
+.org-row { gap: 16px; }
+.org-row span { font: 700 21px var(--font-display); }
+.org-row small { font-size: 13px; }
+.credit { margin: 22px 0 0; text-align: center; font-size: 12.5px; line-height: 1.6; color: var(--muted, #5b6b73); }
+.credit b { color: inherit; font-weight: 700; }
+.app-footer { max-width: 1320px; margin: 8px auto 0; padding: 22px 24px calc(28px + env(safe-area-inset-bottom, 0px)); display: flex; align-items: center; justify-content: center; gap: 12px; text-align: left; }
+.app-footer img { border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.18); }
+.app-footer p { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--muted, #5b6b73); }
+.print-head { display: none; }
+@media (max-width: 640px) { .brand span { display: none; } }
+@media print {
+  .print-head { display: flex !important; align-items: center; gap: 14px; padding: 0 0 10px; margin-bottom: 14px; border-bottom: 2px solid #222; color: #000; font-size: 14px; line-height: 1.35; }
+  .print-head img { width: 56px; height: 56px; }
+  .app-footer { justify-content: flex-start; padding: 12px 0 0; margin-top: 18px; border-top: 1px solid #999; }
+  .app-footer p { color: #000; }
+}
+select[data-path^="leave."][data-path$=".type"] { min-width: 185px; }
+
+/* ---- profile photo and page ---- */
+.avatar { background-size: cover; background-position: center; background-repeat: no-repeat; overflow: hidden; }
+a.avatar { text-decoration: none; }
+.avatar.has-photo { color: transparent; }
+.avatar.xl { width: 112px; height: 112px; font-size: 38px; box-shadow: 0 2px 10px rgba(0,0,0,.2); }
+.profile-card { display: flex; align-items: center; gap: 26px; flex-wrap: wrap; margin-bottom: 18px; }
+.profile-card h3 { font-size: 22px; }
+.profile-card .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+.code-pill { align-self: center; background: var(--gold-tint, #fbf0d4); color: #7a5600; }
+.code-input { max-width: 150px; }

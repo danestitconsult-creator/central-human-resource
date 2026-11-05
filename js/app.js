@@ -3,17 +3,18 @@ import { initAuth } from "./auth.js";
 import {
   collection, doc, getDoc, getDocFromCache, setDoc, updateDoc, deleteDoc, query, where, getDocs, getDocsFromCache
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
-import { computeSummary, pct, LEVELS, CHECKLIST } from "./calc.js";
+import { computeSummary, pct, LEVELS, CHECKLIST, LEAVE_TYPES, computeLeave, leaveDays, leaveResumes, leaveStatus } from "./calc.js";
 import { isIOS, isStandalone, isEmbeddedWebView } from "./env.js";
 import { loadRoll, loadAllRolls, saveRolls, deleteRoll, parseRollWorkbook, prepareRoll, matchStaff, crossCheck, rollKey } from "./roll.js";
 import { EV_LIMITS, EV_CATEGORIES, EV_CATEGORIES_EDTECH, prepareEvidenceFile, dataUrlToBlob, fmtSize } from "./evidence.js";
+import { prepareAvatar } from "./avatar.js";
 import { computeEdtech, FIXED_TOOLS, ITEM_TYPES, CONDITIONS, EDTECH_AREAS } from "./edtech-calc.js";
 
 const $ = id => document.getElementById(id);
 const main = $("main");
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
-const LIMITS = { attendance: 200, movement: 60, findings: 15, tools: 20, allocation: 200 };
+const LIMITS = { attendance: 200, movement: 60, findings: 15, tools: 20, allocation: 200, leave: 100 };
 // Two monitoring departments share one app: Human Resource (the original attendance check, listed first) and EdTech.
 // A check with no "department" field was recorded before EdTech existed, so it is a Human Resource check.
 const DEPTS = [["hr", "Human Resource"], ["edtech", "EdTech"]];
@@ -24,6 +25,7 @@ const TABS_HR = [
   ["attendance", "Attendance"],
   ["roll", "Nominal roll"],
   ["movement", "Movement log"],
+  ["leave", "Leave"],
   ["records", "Records checklist"],
   ["findings", "Findings"],
   ["evidence", "Evidence"],
@@ -59,10 +61,12 @@ const DISTRICTS = [
   "Twifo-Heman-Lower Denkyira", "Upper Denkyira East Municipal", "Upper Denkyira West"
 ];
 
-const STAFF_CATEGORIES = ["Principals", "Regional Staff", "Institute staff", "NSS Personnels", "Voluntary Staff"];
+const STAFF_CATEGORIES = ["Principals", "Regional Staff", "Institute staff", "NSS Personnels", "Voluntary Staff", "Reporting staff"];
 
 const sortList = arr => [...arr].sort((a, b) => a.localeCompare(b, "en", { sensitivity: "base" }));
 let institutions = sortList(DEFAULT_INSTITUTIONS);
+let schoolCodes = {};   // { institution name: school code }, kept by HR and team leads
+const codeFor = name => String(schoolCodes[name] || "").trim();
 const STATUSES = ["On time", "Late", "Absent", "On leave", "On duty elsewhere"];
 const RATINGS = ["Good", "Fair", "Poor"];
 const AREAS = [["attendance", "Attendance"], ["punctuality", "Punctuality"], ["movement", "Staff movement control"], ["records", "Quality of records"]];
@@ -77,6 +81,7 @@ let saveTimer = null, dirty = false;
 const blankAtt = () => ({ name: "", level: "", grade: "", dept: "", signed: "", arrival: "", present: "", status: "", remarks: "" });
 const blankMov = () => ({ name: "", level: "", dept: "", left: "", reason: "", destination: "", authorisedBy: "", entered: "", expectedReturn: "", remarks: "" });
 const blankFind = () => ({ finding: "", level: "", evidence: "", action: "", officer: "", deadline: "" });
+const blankLeave = (name = "") => ({ name, type: "", start: "", end: "", remarks: "" });
 const blankFindEt = () => ({ finding: "", evidence: "", action: "", officer: "", deadline: "" });
 const blankTool = (item = "") => ({ item, quantity: "", distributed: "", stores: "", condition: "", remarks: "" });
 const blankAlloc = (type = "") => ({ type, staff: "", dept: "", quantity: "", condition: "", remarks: "" });
@@ -89,7 +94,7 @@ function newInspection(dept = "hr") {
       ownerName: user.displayName || user.email || "",
       department: "edtech",
       createdAt: Date.now(), updatedAt: Date.now(),
-      institution: { name: "", location: "", head: "", date: "", type: "", team: "", arrived: "", departed: "" },
+      institution: { name: "", code: "", location: "", head: "", date: "", type: "", team: "", arrived: "", departed: "" },
       tools: [...FIXED_TOOLS.map(blankTool), blankTool()],    // desktops, laptops, SM1 tablets, then one row for other items
       allocation: ITEM_TYPES.map(blankAlloc),
       findings: rep(3, blankFindEt),
@@ -102,9 +107,10 @@ function newInspection(dept = "hr") {
     department: "hr",
     ownerName: user.displayName || user.email || "",
     createdAt: Date.now(), updatedAt: Date.now(),
-    institution: { name: "", location: "", head: "", date: "", type: "", team: "", arrived: "", departed: "", roll: "", startTime: "", categories: [] },
+    institution: { name: "", code: "", location: "", head: "", date: "", type: "", team: "", arrived: "", departed: "", roll: "", startTime: "", categories: [] },
     attendance: rep(10, blankAtt),
     movement: rep(5, blankMov),
+    leave: rep(5, blankLeave),
     records: CHECKLIST.map(() => ({ response: "", remarks: "" })),
     findings: rep(3, blankFind),
     assessment: Object.fromEntries(AREAS.map(([k]) => [k, { rating: "", comment: "" }])),
@@ -146,6 +152,7 @@ function normalise(d) {
       .map(r => ({ ...blankAtt(), ...r, signed: yn(r.signed), present: yn(r.present) })),
     movement: (d.movement?.length ? d.movement : base.movement)
       .map(r => ({ ...blankMov(), ...r, entered: yn(r.entered) })),
+    leave: (d.leave?.length ? d.leave : base.leave).map(r => ({ ...blankLeave(), ...r })),
     records: CHECKLIST.map((_, i) => ({ ...base.records[i], ...(d.records?.[i] || {}) })),
     findings: d.findings?.length ? d.findings : base.findings,
     assessment: { ...base.assessment, ...(d.assessment || {}) },
@@ -270,11 +277,24 @@ window.addEventListener("pagehide", () => { saveNow(); });
 const isLead = () => profile.role === "lead";
 const isHr = () => profile.role === "hr";
 const isEdtechRole = () => profile.role === "edtech";
-// Leads and HR can open every monitor's check (read-only). The EdTech role does the same, but for EdTech checks only.
-const canSeeAll = () => isLead() || isHr() || isEdtechRole();
-const canSeeDept = d => isLead() || isHr() || (isEdtechRole() && d === "edtech");
+const isDeputy = () => profile.role === "deputy";   // Deputy Director: supervises every department (read-only)
+// Leads, HR and the Deputy Director can open every monitor's check (read-only). The EdTech role does the same, but for EdTech checks only.
+const canSeeAll = () => isLead() || isHr() || isDeputy() || isEdtechRole();
+const canSeeDept = d => isLead() || isHr() || isDeputy() || (isEdtechRole() && d === "edtech");
 const deptsFor = () => (isEdtechRole() ? DEPTS.filter(([k]) => k === "edtech") : DEPTS);
 const canEvidenceAny = () => isHr() || (isEdtechRole() && isEt());   // may add evidence to other monitors' checks
+
+const ROLE_LABELS = { monitor: "Monitor", lead: "Team lead", hr: "HR", edtech: "EdTech officer", deputy: "Deputy Director" };
+const initialsOf = who => who.split(/[\s@.]+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join("") || "?";
+function renderAvatar() {
+  const who = user.displayName || user.email || "";
+  for (const el of document.querySelectorAll(".avatar")) {
+    const photo = profile.photo || "";
+    el.classList.toggle("has-photo", !!photo);
+    el.style.backgroundImage = photo ? `url("${photo}")` : "";
+    el.textContent = photo ? "" : initialsOf(who);
+  }
+}
 
 async function loadProfile() {
   profile = { role: "monitor" };
@@ -295,9 +315,10 @@ async function loadProfile() {
   } catch (e) { console.warn("Could not load profile (are the Firestore rules published?)", e); }
   const who = user.displayName || user.email || "";
   $("user-label").textContent = who;
-  $("avatar").textContent = who.split(/[\s@.]+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join("") || "?";
+  renderAvatar();
   const badge = $("role-badge");
-  badge.textContent = isHr() ? "HR" : isEdtechRole() ? "EdTech" : "Team lead";
+  badge.textContent = isHr() ? "HR" : isDeputy() ? "Deputy Director" : isEdtechRole() ? "EdTech" : "Team lead";
+  dashView = isDeputy() ? "all" : "mine";   // the Deputy Director opens on everyone's records
   badge.classList.toggle("hidden", !canSeeAll());
 }
 
@@ -308,6 +329,30 @@ async function loadInstitutions() {
     const snap = await withCacheFallback(() => getDoc(ref), () => getDocFromCache(ref), 5000);
     if (snap.exists() && Array.isArray(snap.data().list)) institutions = sortList(snap.data().list);
   } catch (e) { console.warn("Could not load institution list (are the Firestore rules published?)", e); }
+  schoolCodes = {};
+  try {
+    const ref = doc(db, "config", "schoolCodes");
+    const snap = await withCacheFallback(() => getDoc(ref), () => getDocFromCache(ref), 5000);
+    if (snap.exists() && snap.data().codes && typeof snap.data().codes === "object") schoolCodes = { ...snap.data().codes };
+  } catch (e) { console.warn("Could not load school codes (are the Firestore rules published?)", e); }
+}
+
+const canEditCodeList = () => isHr() || isLead();
+// Saves one institution's code in the shared list (HR and team leads only, enforced by the rules too).
+async function saveSchoolCode(name, code) {
+  if (!name || !canEditCodeList()) return false;
+  code = String(code || "").trim();
+  const previous = schoolCodes[name];
+  schoolCodes[name] = code;
+  try {
+    const write = setDoc(doc(db, "config", "schoolCodes"), { codes: { [name]: code }, updatedAt: Date.now(), updatedBy: user.uid }, { merge: true });
+    if (navigator.onLine) await settle(write); else write.catch(console.error);
+    return true;
+  } catch (err) {
+    if (previous === undefined) delete schoolCodes[name]; else schoolCodes[name] = previous;
+    toast("Could not save the school code: " + (err.code || err.message));
+    return false;
+  }
 }
 
 // Saves the shared institution list. Returns true on success, restores the old list on failure.
@@ -360,6 +405,7 @@ function route() {
     return createInspection(dept);
   }
   if (h === "#/roll") return showRollPage();
+  if (h === "#/profile") return showProfilePage();
   const m = h.match(/^#\/i\/(.+)$/);
   if (m) return openEditor(m[1]);
   dashDept = h === "#/edtech" || isEdtechRole() ? "edtech" : "hr";
@@ -408,11 +454,11 @@ async function showDashboard() {
     const cardEt = i => {
       const own = i.ownerId === user.uid;
       const e = computeEdtech(i);
-      const search = [i.institution?.name, i.institution?.location, i.ownerName].join(" ").toLowerCase();
+      const search = [i.institution?.name, i.institution?.code, i.institution?.location, i.ownerName].join(" ").toLowerCase();
       return `<article class="card tone-${toneOf(e.accountedRate)}" data-search="${esc(search)}">
         <div class="card-top">
           <div><h3>${esc(i.institution?.name || "Untitled check")}</h3>
-            <p class="muted small">${esc(i.institution?.location || "No district chosen")}</p></div>
+            <p class="muted small">${esc([i.institution?.code ? "Code " + i.institution.code : "", i.institution?.location || "No district chosen"].filter(Boolean).join(" · "))}</p></div>
           <div class="rate"><b>${pct(e.accountedRate)}</b><span>accounted for</span></div>
         </div>
         <div class="chips">
@@ -435,11 +481,11 @@ async function showDashboard() {
       if (et) return cardEt(i);
       const own = i.ownerId === user.uid;
       const sum = computeSummary(i);
-      const search = [i.institution?.name, i.institution?.location, i.ownerName].join(" ").toLowerCase();
+      const search = [i.institution?.name, i.institution?.code, i.institution?.location, i.ownerName].join(" ").toLowerCase();
       return `<article class="card tone-${toneOf(sum.attendanceRate)}" data-search="${esc(search)}">
         <div class="card-top">
           <div><h3>${esc(i.institution?.name || "Untitled check")}</h3>
-            <p class="muted small">${esc(i.institution?.location || "No district chosen")}</p></div>
+            <p class="muted small">${esc([i.institution?.code ? "Code " + i.institution.code : "", i.institution?.location || "No district chosen"].filter(Boolean).join(" · "))}</p></div>
           <div class="rate"><b>${pct(sum.attendanceRate)}</b><span>attendance</span></div>
         </div>
         <div class="chips">
@@ -524,6 +570,8 @@ async function openEditor(id) {
     }
     docId = id; state = normalise(data); dashDept = state.department; dirty = false; tab = "institution"; rollStaff = null; rollInfo = null; evidence = null; evidenceError = ""; lastRollTotal = null;
     readOnly = data.ownerId !== user.uid;   // leads and HR can view other monitors' checks but not edit them (HR can still add evidence)
+    // A check recorded before school codes existed picks up its institution's listed code the first time its owner opens it
+    if (!readOnly && !filled(state.institution.code) && codeFor(state.institution.name)) { state.institution.code = codeFor(state.institution.name); scheduleSave(); }
     renderEditor();
     refreshRoll();
   } catch (err) {
@@ -549,6 +597,7 @@ function tabDone(k) {
     institution: () => filled(state.institution.name) && filled(state.institution.date),
     attendance: () => state.attendance.some(r => filled(r.name)),
     movement: () => state.movement.some(r => filled(r.name)),
+    leave: () => state.leave.some(r => filled(r.name)),
     records: () => state.records.some(r => filled(r.response)),
     findings: () => state.findings.some(r => filled(r.finding)),
     roll: () => !!rollStaff && crossCheck(state.attendance, rollStaff).matched > 0,
@@ -566,6 +615,7 @@ function renderEditor() {
       <a href="${homeHash(state.department)}" class="btn small">← All checks</a>
       <h2 id="title">${esc(state.institution.name || "Untitled check")}</h2>
       <span class="pill dept-pill">${esc(deptName(state.department))}</span>
+      <span class="pill code-pill${state.institution.code ? "" : " hidden"}" id="code-pill">School code ${esc(state.institution.code || "")}</span>
       <span id="save-status" class="muted small">${readOnly ? "" : "All changes saved"}</span>
       <button class="btn small" data-action="export">Export Excel</button>
     </div>
@@ -580,7 +630,7 @@ function renderTab() {
   const body = $("tab-body");
   const views = isEt()
     ? { institution: tInstitution, tools: tTools, allocation: tAllocation, findings: tFindings, summary: tSummaryEt, evidence: tEvidence }
-    : { institution: tInstitution, attendance: tAttendance, movement: tMovement, records: tRecords, findings: tFindings, summary: tSummary, roll: tRoll, evidence: tEvidence };
+    : { institution: tInstitution, attendance: tAttendance, movement: tMovement, leave: tLeave, records: tRecords, findings: tFindings, summary: tSummary, roll: tRoll, evidence: tEvidence };
   if (!views[tab]) tab = "institution";
   body.innerHTML = views[tab]();
   // On phones each table row becomes a card; the CSS shows each field's column heading above it (see "stackable" in style.css)
@@ -598,6 +648,22 @@ function renderTab() {
     if (!el.dataset.action && !el.closest("[data-keep]")) el.disabled = true;   // keep Print working, and the Evidence panel (HR can add evidence)
   });
 }
+
+// A code that is in the shared list is shown but cannot be changed on the check; HR and team leads can change it.
+const codeLocked = i => !!codeFor(i.name) && !canEditCodeList();
+const codeNote = i => (!filled(i.name) ? "Choose the institution first."
+  : codeFor(i.name) ? (canEditCodeList() ? "From the school code list. Changes here update the list for everyone." : "From the school code list.")
+  : canEditCodeList() ? "Not in the school code list yet. What you type here is saved to the list." : "Not in the school code list yet. Ask HR to add it.");
+// After the institution changes: fill in its listed code, and refresh the field, the note and the header badge
+function syncSchoolCode() {
+  const i = state.institution;
+  if (!readOnly) i.code = codeFor(i.name);
+  const box = $("school-code");
+  if (box) { box.value = i.code; box.readOnly = readOnly || codeLocked(i); }
+  const note = $("school-code-note"); if (note) note.textContent = codeNote(i);
+  const pill = $("code-pill"); if (pill) { pill.textContent = "School code " + (i.code || ""); pill.classList.toggle("hidden", !i.code); }
+}
+let codeTimer = null;
 
 function tInstitution() {
   const i = state.institution;
@@ -619,6 +685,11 @@ function tInstitution() {
           <button type="button" class="btn small danger" data-inst="del" title="Remove the selected institution from the list">Delete</button>
         </div>
       </div>
+      <div class="field">
+        <label for="school-code">School code</label>
+        <input id="school-code" type="text" data-path="institution.code" value="${esc(i.code)}" placeholder="e.g. 0701234" autocomplete="off"${codeLocked(i) ? " readonly" : ""}>
+        <small class="muted" id="school-code-note">${esc(codeNote(i))}</small>
+      </div>
       <label>Location / district<select data-path="institution.location">${listed(DISTRICTS, i.location, "Select district…")}</select></label>
       ${f("Head of institution", "head")}
     </div>
@@ -631,13 +702,13 @@ function tInstitution() {
       ${f("Monitoring team members", "team")}
       ${f("Time team arrived", "arrived", "time")}
       ${f("Time team departed", "departed", "time")}
-      ${et ? "" : f("Official start time", "startTime", "time")}
+      ${et ? "" : f("Official start time of work", "startTime", "time")}
     </div>
   </section>
   ${et ? "" : `<section class="section">
     <h3>Staff <small>Who the check covers</small></h3>
     <div class="grid">
-      ${f("Total staff on nominal roll (entered by monitor)", "roll", "number", 'inputmode="numeric" min="0"')}
+      ${f("Total staff in the institute", "roll", "number", 'inputmode="numeric" min="0"')}
       <div class="field">
         <span>Total staff on HR nominal roll</span>
         <div class="inline roll-total-box">
@@ -751,7 +822,7 @@ function tFindings() {
 }
 
 function tSummary() {
-  const s = computeSummary(state), i = state.institution;
+  const s = computeSummary(state), i = state.institution, lv2 = computeLeave(state, asOfDay());
   const toneOf = r => (r === null ? "none" : r >= 0.9 ? "good" : r >= 0.75 ? "warn" : "bad");
   const r = (l, v) => `<tr><td>${l}</td><td class="val">${esc(v)}</td></tr>`;
 
@@ -794,24 +865,153 @@ function tSummary() {
       ${flag(s.signedNotPresent, "Signed the register but were not present")}
       ${flag(s.notInBook, "Out of office, not in the movement book")}
       ${flag(s.absent, "Absent without approval")}
+      ${flag(lv2.signedWhileOnLeave, "On leave but signed or present on the attendance sheet")}
       ${rollFlags(flag)}
     </div>
 
     <div class="two-col">
       <table class="grid-table"><tbody>
         <tr class="sec"><td colspan="2">Institution</td></tr>
-        ${rollSummaryRows(r, i)}
+        ${r("School code", i.code || "—")}${rollSummaryRows(r, i)}
         ${r("Staff categories covered", (i.categories || []).join(", ") || "—")}
         <tr class="sec"><td colspan="2">Attendance</td></tr>
         ${r("Staff listed on attendance sheet", s.listed)}${r("Present on time", s.onTime)}${r("Present but late", s.late)}
         ${r("Absent with approval (leave or on duty elsewhere)", s.approved)}${r("Absent without approval", s.absent)}
         <tr class="sec"><td colspan="2">Staff movement</td></tr>
         ${r("Staff found out of office", s.movementListed)}${r("Not entered in movement book", s.notInBook)}
+        <tr class="sec"><td colspan="2">Staff on leave</td></tr>
+        ${r("Staff on leave recorded", lv2.count)}${r("On leave on the day of the check", lv2.ongoing)}${r("Total leave days", lv2.totalDays)}
+        ${r("Average length of leave (days)", lv2.avgDays === null ? "—" : (Math.round(lv2.avgDays * 10) / 10))}${r("Longest leave (days)", lv2.longest || "—")}
       </tbody></table>
       <div><h4 style="margin-bottom:10px">By staff level</h4>
       <div class="scroll" style="max-height:none;margin-top:0"><table class="grid-table"><thead><tr><th>Level</th><th>Listed</th><th>Present</th><th>Late</th><th>Absent</th><th>Attendance rate</th></tr></thead><tbody>${lv}</tbody></table></div>
       <p class="muted small">Present means On time or Late. Absent means without approval. Staff with no Level selected are not counted here.</p></div>
     </div>`;
+}
+
+/* ---------- profile: my photo, details and activity ---------- */
+async function showProfilePage() {
+  await saveNow();
+  state = null; docId = null; readOnly = false;
+  main.innerHTML = '<p class="muted pad">Loading…</p>';
+  let mine = [];
+  try { const snap = await getDocs(query(collection(db, "inspections"), where("ownerId", "==", user.uid))); mine = snap.docs.map(d => d.data()); }
+  catch (err) { console.warn("Could not count the checks", err); }
+  const hr = mine.filter(i => deptOf(i) === "hr").length, et = mine.filter(i => deptOf(i) === "edtech").length;
+  const last = mine.reduce((m, i) => Math.max(m, i.updatedAt || 0), 0);
+  const who = user.displayName || user.email || "";
+  const row = (l, v) => `<tr><td>${l}</td><td class="val">${esc(v)}</td></tr>`;
+  main.innerHTML = `
+    <div class="page-head">
+      <div><h2>My profile</h2><p class="muted">Your photo and details. Your photo is shown in the top bar on your devices.</p></div>
+      <div class="head-actions"><a class="btn" href="${homeHash(isEdtechRole() ? "edtech" : "hr")}">← All checks</a></div>
+    </div>
+    <div class="panel profile-card">
+      <span class="avatar xl" id="profile-avatar" aria-hidden="true"></span>
+      <div>
+        <h3>${esc(who || "Your account")}</h3>
+        <p class="muted">${esc(ROLE_LABELS[profile.role] || "Monitor")}${user.email && user.email !== who ? " · " + esc(user.email) : ""}</p>
+        <div class="actions">
+          <button type="button" class="btn primary" data-action="photo-pick">${profile.photo ? "Change photo" : "Upload photo"}</button>
+          ${profile.photo ? '<button type="button" class="btn danger" data-action="photo-remove">Remove photo</button>' : ""}
+          <input id="photo-file" type="file" accept="image/*" hidden>
+        </div>
+        <p class="muted small" id="photo-note">A clear, front-facing photo works best. It is cropped to a square and shrunk automatically.</p>
+      </div>
+    </div>
+    <div class="two-col">
+      <div class="panel"><h3>My details</h3>
+        <table class="grid-table"><tbody>
+          ${row("Name", who || "—")}${row("Email", user.email || "—")}${row("Role", ROLE_LABELS[profile.role] || "Monitor")}
+        </tbody></table></div>
+      <div class="panel"><h3>My activity</h3>
+        <table class="grid-table"><tbody>
+          ${row("Human Resource checks recorded", hr)}${row("EdTech checks recorded", et)}
+          ${row("Last updated", last ? fmtDay(last) : "—")}
+        </tbody></table></div>
+    </div>`;
+  renderAvatar();
+}
+
+async function uploadPhoto(file) {
+  const note = $("photo-note");
+  try {
+    if (note) note.textContent = "Preparing your photo…";
+    const data = await prepareAvatar(file);
+    const write = updateDoc(doc(db, "users", user.uid), { photo: data, photoUpdatedAt: Date.now() });
+    if (navigator.onLine) await settle(write); else write.catch(console.error);
+    profile.photo = data;
+    toast("Photo saved");
+    showProfilePage();
+  } catch (err) {
+    console.error(err);
+    if (note) note.textContent = "Could not save the photo: " + (err.message || err.code);
+    toast("Could not save the photo");
+  }
+}
+
+async function removePhoto() {
+  if (!(await askConfirm("Remove your photo?", "Your initials will be shown instead.", "Remove"))) return;
+  try {
+    const write = updateDoc(doc(db, "users", user.uid), { photo: "", photoUpdatedAt: Date.now() });
+    if (navigator.onLine) await settle(write); else write.catch(console.error);
+    profile.photo = "";
+    toast("Photo removed");
+    showProfilePage();
+  } catch (err) { toast("Could not remove the photo: " + (err.code || err.message)); }
+}
+
+/* ---------- Leave: staff on leave and how long it lasts (Human Resource) ---------- */
+const todayIso = () => new Date().toISOString().slice(0, 10);
+const asOfDay = () => state.institution.date || todayIso();
+const fmtIsoDay = v => (v ? new Date(v + "T00:00").toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "");
+
+function leaveCells(r) {
+  const days = leaveDays(r.start, r.end), st = leaveStatus(r, asOfDay());
+  const dur = days === null ? (filled(r.start) && filled(r.end) ? '<span class="roll-badge no" title="The end date is before the start date">Check dates</span>' : "") : `<b>${days}</b> ${days === 1 ? "day" : "days"}`;
+  const badge = { ongoing: ["warn", "On leave"], upcoming: ["info", "Starts later"], ended: ["ok", "Back at work"] }[st];
+  const back = st && st !== "ended" ? `<small class="muted">back ${esc(fmtIsoDay(leaveResumes(r.end)))}</small>` : "";
+  return { dur, status: badge ? `<span class="roll-badge ${badge[0]}">${badge[1]}</span> ${back}` : "" };
+}
+
+function leaveFlags() {
+  const l = computeLeave(state, asOfDay());
+  return `<div class="flag neutral"><b>${l.count}</b><span>Staff on leave recorded</span></div>
+    <div class="flag neutral"><b>${l.ongoing}</b><span>On leave on the day of the check</span></div>
+    <div class="flag neutral"><b>${l.totalDays}</b><span>Leave days in total (longest ${l.longest})</span></div>
+    ${etFlag(l.signedWhileOnLeave, "On leave but signed or present on the attendance sheet")}
+    ${etFlag(l.badDates, "Rows with a missing or wrong date")}`;
+}
+
+function leaveRollHint() {
+  if (!rollStaff || readOnly) return "";
+  const listed = new Set(state.leave.filter(r => filled(r.name)).map(r => r.name.trim().toLowerCase()));
+  const onRollLeave = rollStaff.filter(x => x.post === "On leave" && !listed.has(String(x.name).trim().toLowerCase()));
+  return onRollLeave.length
+    ? `<p class="banner-ro">The HR nominal roll marks <b>${onRollLeave.length}</b> ${onRollLeave.length === 1 ? "staff member" : "staff"} at this institution as on leave who ${onRollLeave.length === 1 ? "is" : "are"} not listed below. <button class="link" type="button" data-action="leave-from-roll">Add ${onRollLeave.length === 1 ? "them" : "them all"}</button></p>`
+    : "";
+}
+
+function tLeave() {
+  const rows = state.leave.map((r, n) => { const c = leaveCells(r); return `<tr>
+    <td class="num">${n + 1}</td>
+    <td>${inp(`leave.${n}.name`, r.name, "text", 'list="roll-names" autocomplete="off"')}</td>
+    <td class="roll-cell" data-rb="${n}">${rollBadge(r.name)}</td>
+    <td>${sel(`leave.${n}.type`, LEAVE_TYPES, r.type)}</td>
+    <td>${inp(`leave.${n}.start`, r.start, "date")}</td>
+    <td>${inp(`leave.${n}.end`, r.end, "date")}</td>
+    <td class="chk-cell" data-ld="${n}">${c.dur}</td>
+    <td class="chk-cell" data-ls="${n}">${c.status}</td>
+    <td>${inp(`leave.${n}.remarks`, r.remarks)}</td>
+    <td><button class="icon" title="Remove row" data-del="leave.${n}">✕</button></td></tr>`; }).join("");
+  return `<h3>Staff on leave</h3>
+    <p class="muted small">Record each staff member on leave, the type of leave, and the first and last day of it. The number of days and whether the person is on leave on the day of the check are worked out for you.</p>
+    <div id="leave-hint">${leaveRollHint()}</div>
+    <div class="scroll"><table class="grid-table stackable"><thead><tr>
+      <th>No.</th><th>Name of staff</th><th>On roll?</th><th>Type of leave</th><th>Leave starts</th><th>Leave ends (last day)</th><th>Duration</th><th>Status</th><th>Remarks</th><th></th>
+    </tr></thead><tbody>${rows}</tbody></table></div>
+    <button class="btn" data-add="leave">+ Add row (${state.leave.length}/${LIMITS.leave})</button>
+    <div class="flags" id="leave-flags" style="margin-top:18px">${leaveFlags()}</div>${rollDatalist()}`;
 }
 
 /* ---------- EdTech department: technology tools, staff allocation, summary ---------- */
@@ -937,7 +1137,7 @@ function tSummaryEt() {
     <div class="two-col">
       <table class="grid-table"><tbody>
         <tr class="sec"><td colspan="2">Institution</td></tr>
-        ${r("Name of institute", i.name || "—")}${r("Location / district", i.location || "—")}${r("Head of institution", i.head || "—")}
+        ${r("Name of institute", i.name || "—")}${r("School code", i.code || "—")}${r("Location / district", i.location || "—")}${r("Head of institution", i.head || "—")}
         <tr class="sec"><td colspan="2">Technology tools</td></tr>
         ${r("Total number of desktop computers", e.desktop.quantity)}${r("Total number of laptop computers", e.laptop.quantity)}${r("Total number of SM1 tablets", e.tablet.quantity)}
         ${r("Others", e.others || "—")}
@@ -994,7 +1194,7 @@ const rollDatalist = () => rollStaff
   ? `<datalist id="roll-names">${rollStaff.map(x => `<option value="${esc(x.name)}">${esc(x.job)}</option>`).join("")}</datalist>` : "";
 
 function rollSummaryRows(r, i) {
-  const entered = r("Staff on nominal roll (as entered by monitor)", i.roll || "—");
+  const entered = r("Total staff in the institute", i.roll || "—");
   if (!rollStaff) return entered;
   const cc = crossCheck(state.attendance, rollStaff);
   return entered + r("Staff on HR nominal roll", cc.total)
@@ -1031,7 +1231,7 @@ function tRoll() {
       ${tile(cc.notChecked, "On the roll, not yet checked", cc.notChecked ? "warn" : "")}
       ${tile(cc.notOnRoll.length, "Listed but not on the roll", cc.notOnRoll.length ? "raised" : "")}
     </div>
-    ${Number.isFinite(entered) && filled(state.institution.roll) && entered !== cc.total ? `<p class="banner-ro">You entered <b>${entered}</b> as the total on the Institution tab, but the HR roll shows <b>${cc.total}</b>.</p>` : ""}
+    ${Number.isFinite(entered) && filled(state.institution.roll) && entered !== cc.total ? `<p class="banner-ro">You entered <b>${entered}</b> as the total staff in the institute on the Institution tab, but the HR roll shows <b>${cc.total}</b>.</p>` : ""}
     ${cc.notOnRoll.length ? `<p class="small"><b>Not found on the roll:</b> ${cc.notOnRoll.map(esc).join(", ")}. Check the spelling, or flag these staff to HR.</p>` : ""}
     ${cc.duplicates.length ? `<p class="small"><b>Entered more than once:</b> ${cc.duplicates.map(esc).join(", ")}.</p>` : ""}
     <div class="inline roll-tools">
@@ -1101,7 +1301,7 @@ function tEvidence() {
   const upload = canAddEvidence() ? `
     <div class="grid">
       <label>Type of evidence<select id="ev-cat">${opts(evCats(), evCats()[0], false)}</select></label>
-      <label>Caption or note (optional)<input id="ev-cap" type="text" placeholder="e.g. Register at 8:15 am, Block B" autocomplete="off"></label>
+      <label>Remarks (optional)<input id="ev-cap" type="text" placeholder="e.g. Register at 8:15 am, Block B" autocomplete="off"></label>
     </div>
     <div class="inline ev-actions">
       <label class="btn primary file-btn">Take a photo<input id="ev-cam" type="file" accept="image/*" capture="environment" hidden></label>
@@ -1208,6 +1408,7 @@ function renderRollPage() {
   const tr = names.map(n => {
     const r = byKey.get(rollKey(n));
     return `<tr><td><button type="button" class="link" data-roll-inst="${esc(n)}">${esc(n)}</button></td>
+      <td>${canEditCodeList() ? `<input class="code-input" type="text" data-code-inst="${esc(n)}" value="${esc(codeFor(n))}" placeholder="Code" aria-label="School code for ${esc(n)}" autocomplete="off">` : esc(codeFor(n)) || '<span class="muted">—</span>'}</td>
       <td class="val">${r ? r.count : "—"}</td><td class="val">${r ? r.count - (r.onLeave || 0) : "—"}</td><td class="val">${r ? (r.onLeave || 0) : "—"}</td>
       <td>${r ? esc(fmtDay(r.importedAt || 0)) : '<span class="muted">No roll uploaded</span>'}</td>
       ${isHr() ? `<td>${r ? `<button type="button" class="btn small danger" data-roll-del="${esc(r.key || r.id)}">Delete</button>` : ""}</td>` : ""}</tr>`;
@@ -1229,9 +1430,9 @@ function renderRollPage() {
       <div id="roll-results"></div>
     </div>
     <div class="panel" style="margin-top:18px">
-      <h3>Staff on the roll, by institution</h3>
-      <div class="scroll"><table class="grid-table"><thead><tr><th>Institution</th><th>On the roll</th><th>At post</th><th>On leave</th><th>Roll updated</th>${isHr() ? "<th></th>" : ""}</tr></thead>
-      <tbody>${tr}</tbody>${total ? `<tfoot><tr class="total"><td>All institutions</td><td class="val">${total}</td><td class="val">${total - leave}</td><td class="val">${leave}</td><td></td>${isHr() ? "<td></td>" : ""}</tr></tfoot>` : ""}</table></div>
+      <h3>Staff on the roll and school codes, by institution</h3>
+      <div class="scroll"><table class="grid-table"><thead><tr><th>Institution</th><th>School code</th><th>On the roll</th><th>At post</th><th>On leave</th><th>Roll updated</th>${isHr() ? "<th></th>" : ""}</tr></thead>
+      <tbody>${tr}</tbody>${total ? `<tfoot><tr class="total"><td>All institutions</td><td></td><td class="val">${total}</td><td class="val">${total - leave}</td><td class="val">${leave}</td><td></td>${isHr() ? "<td></td>" : ""}</tr></tfoot>` : ""}</table></div>
     </div>`;
   $("roll-inst").value = rollView.inst; $("roll-q").value = rollView.q;
   renderRollResults();
@@ -1338,6 +1539,13 @@ async function importRoll(file) {
 /* ---------- file pickers and autofill (change events) ---------- */
 main.addEventListener("change", e => {
   const el = e.target;
+  if (el.dataset.codeInst !== undefined) {   // HR / team lead editing a school code on the Nominal roll page
+    const nm = el.dataset.codeInst, val = el.value.trim().replace(/\s+/g, " ");
+    el.value = val;
+    saveSchoolCode(nm, val).then(ok => { if (ok) toast(val ? `Code saved for ${nm}` : `Code cleared for ${nm}`); else el.value = codeFor(nm); });
+    return;
+  }
+  if (el.id === "photo-file") { const f = el.files?.[0]; el.value = ""; if (f) uploadPhoto(f); return; }
   if (el.id === "roll-file") { const f = el.files?.[0]; el.value = ""; if (f) importRoll(f); return; }
   if (el.id === "ev-file" || el.id === "ev-cam") { const files = [...(el.files || [])]; el.value = ""; uploadEvidence(files); return; }
   // Picking a name from the roll fills the grade with their job, if it is still empty
@@ -1377,11 +1585,28 @@ main.addEventListener("input", e => {
   setByPath(state, path, el.value);
   if (el.tagName === "SELECT") el.dataset.val = el.value;
 
-  if (path === "institution.name") { $("title").textContent = el.value || "Untitled check"; refreshRoll(); }
+  if (path === "institution.name") { $("title").textContent = el.value || "Untitled check"; syncSchoolCode(); refreshRoll(); }
+  if (path === "institution.code") {
+    const pill = $("code-pill"); if (pill) { pill.textContent = "School code " + el.value.trim(); pill.classList.toggle("hidden", !el.value.trim()); }
+    if (canEditCodeList() && filled(state.institution.name)) {   // HR and team leads keep the shared list up to date from here
+      clearTimeout(codeTimer); const nm = state.institution.name, cd = el.value;
+      codeTimer = setTimeout(() => saveSchoolCode(nm, cd), 1000);
+    }
+  }
 
   // "On roll?" badge next to the name
-  const nm = path.match(/^attendance\.(\d+)\.name$|^allocation\.(\d+)\.staff$/);
-  if (nm) { const cell = main.querySelector(`[data-rb="${nm[1] ?? nm[2]}"]`); if (cell) cell.innerHTML = rollBadge(el.value); }
+  const nm = path.match(/^attendance\.(\d+)\.name$|^allocation\.(\d+)\.staff$|^leave\.(\d+)\.name$/);
+  if (nm) { const cell = main.querySelector(`[data-rb="${nm[1] ?? nm[2] ?? nm[3]}"]`); if (cell) cell.innerHTML = rollBadge(el.value); }
+
+  // Leave: live duration and status for the row, plus the totals under the table
+  const lm = path.match(/^leave\.(\d+)\./);
+  if (lm) {
+    const c = leaveCells(state.leave[lm[1]]);
+    const d1 = main.querySelector(`[data-ld="${lm[1]}"]`), d2 = main.querySelector(`[data-ls="${lm[1]}"]`);
+    if (d1) d1.innerHTML = c.dur; if (d2) d2.innerHTML = c.status;
+    if ($("leave-flags")) $("leave-flags").innerHTML = leaveFlags();
+    if ($("leave-hint")) $("leave-hint").innerHTML = leaveRollHint();
+  }
 
   // EdTech: live "adds up" check on each tools row, and the running totals under the tables
   const tm = path.match(/^tools\.(\d+)\./);
@@ -1437,7 +1662,16 @@ main.addEventListener("click", async e => {
   if (t.dataset.evView) return viewEvidence(t.dataset.evView);
   if (t.dataset.evDel) return deleteEvidence(t.dataset.evDel);
 
+  if (t.dataset.action === "photo-pick") return $("photo-file")?.click();
+  if (t.dataset.action === "photo-remove") return removePhoto();
   if (t.dataset.action === "new") return createInspection(t.dataset.dept || dashDept);
+  if (t.dataset.action === "leave-from-roll") {
+    const listed = new Set(state.leave.filter(r => filled(r.name)).map(r => r.name.trim().toLowerCase()));
+    const names = (rollStaff || []).filter(x => x.post === "On leave" && !listed.has(String(x.name).trim().toLowerCase())).map(x => x.name);
+    const free = state.leave.filter(r => !filled(r.name) && !filled(r.type) && !filled(r.start) && !filled(r.end) && !filled(r.remarks));
+    names.forEach(nm2 => { const slot = free.shift(); if (slot) slot.name = nm2; else if (state.leave.length < LIMITS.leave) state.leave.push(blankLeave(nm2)); });
+    scheduleSave(); renderTab(); return updateTabDots();
+  }
   if (t.dataset.action === "delete") return deleteInspection(t.dataset.id);
   if (t.dataset.action === "print") return window.print();
   if (t.dataset.action === "export") return exportXlsx();
@@ -1445,7 +1679,7 @@ main.addEventListener("click", async e => {
   if (t.dataset.add) {
     const k = t.dataset.add;
     if (state[k].length >= LIMITS[k]) return toast(`Maximum of ${LIMITS[k]} rows reached.`);
-    state[k].push({ attendance: blankAtt, movement: blankMov, findings: isEt() ? blankFindEt : blankFind, tools: blankTool, allocation: blankAlloc }[k]());
+    state[k].push({ attendance: blankAtt, movement: blankMov, findings: isEt() ? blankFindEt : blankFind, tools: blankTool, allocation: blankAlloc, leave: blankLeave }[k]());
     scheduleSave(); updateTabDots(); return renderTab();
   }
   if (t.dataset.del) {
@@ -1467,7 +1701,7 @@ function exportEdtechXlsx() {
   const f = e.flags;
 
   add("Institution Details", [["Field", "Entry"],
-    ["Name of institution", i.name], ["Location / district", i.location], ["Head of institution", i.head],
+    ["Name of institution", i.name], ["School code", i.code], ["Location / district", i.location], ["Head of institution", i.head],
     ["Date of check", i.date], ["Type of check", i.type], ["Monitoring team members", i.team],
     ["Time team arrived / departed", `${i.arrived} / ${i.departed}`]]);
 
@@ -1495,7 +1729,7 @@ function exportEdtechXlsx() {
     ["TOTAL NUMBER OF LAPTOP COMPUTERS ALLOCATED", e.laptop.allocated],
     ["TOTAL NUMBER OF SM1 TABLETS ALLOCATED", e.tablet.allocated],
     ["OTHERS", e.others], [],
-    ["Date of check", i.date], ["Type of check", i.type], [],
+    ["School code", i.code], ["Date of check", i.date], ["Type of check", i.type], [],
     ["Items accounted for (distributed or in stores)", pct(e.accountedRate)],
     ["Desktops, laptops and tablets allocated to staff", pct(e.allocationRate)],
     ["Items in good condition", pct(e.goodRate)], [],
@@ -1523,16 +1757,23 @@ function exportXlsx() {
   const used = (arr, k = "name") => arr.filter(r => String(r[k]).trim() !== "");
 
   add("Institution Details", [["Field", "Entry"],
-    ["Name of institution", i.name], ["Location / district", i.location], ["Head of institution", i.head],
+    ["Name of institution", i.name], ["School code", i.code], ["Location / district", i.location], ["Head of institution", i.head],
     ["Date of check", i.date], ["Type of check", i.type], ["Monitoring team members", i.team],
-    ["Time team arrived / departed", `${i.arrived} / ${i.departed}`], ["Total staff on nominal roll", i.roll],
-    ["Official start time", i.startTime], ["Staff categories covered", (i.categories || []).join(", ")]]);
+    ["Time team arrived / departed", `${i.arrived} / ${i.departed}`], ["Total staff in the institute", i.roll],
+    ["Official start time of work", i.startTime], ["Staff categories covered", (i.categories || []).join(", ")]]);
 
   add("Attendance Sheet", [["No.", "Name of staff", "Level", "Grade", "Unit / Dept", "Signed register?", "Arrival time", "Physically present?", "Status", "Remarks"],
     ...used(d.attendance).map((r, n) => [n + 1, r.name, r.level, r.grade, r.dept, r.signed, r.arrival, r.present, r.status, r.remarks])]);
 
   add("Movement Log", [["No.", "Name of staff", "Level", "Department", "Time left office", "Reason given", "Destination", "Authorised by", "Entered in movement book?", "Expected return", "Remarks"],
     ...used(d.movement).map((r, n) => [n + 1, r.name, r.level, r.dept, r.left, r.reason, r.destination, r.authorisedBy, r.entered, r.expectedReturn, r.remarks])]);
+
+  const asOf = i.date || todayIso(), lv = computeLeave(d, asOf);
+  const statusLabel = { ongoing: "On leave on the day of the check", upcoming: "Starts later", ended: "Back at work" };
+  add("Leave", [["No.", "Name of staff", "Type of leave", "Leave starts", "Leave ends (last day)", "Duration (days)", "Due back", "Status on the day of the check", "Remarks"],
+    ...used(d.leave).map((r, n) => [n + 1, r.name, r.type, r.start, r.end, leaveDays(r.start, r.end) ?? "", leaveResumes(r.end), statusLabel[leaveStatus(r, asOf)] || "", r.remarks]),
+    [], ["", "Staff on leave recorded", lv.count], ["", "On leave on the day of the check", lv.ongoing], ["", "Total leave days", lv.totalDays],
+    ["", "Average length of leave (days)", lv.avgDays === null ? "" : Math.round(lv.avgDays * 10) / 10], ["", "Longest leave (days)", lv.longest || ""]]);
 
   add("Records Checklist", [["No.", "Item to verify", "Response", "Remarks"],
     ...CHECKLIST.map((c, n) => [n + 1, c, d.records[n].response, d.records[n].remarks]),
@@ -1546,11 +1787,13 @@ function exportXlsx() {
     ...ROLES.map(([k, l]) => [l, d.signoff[k].name, d.signoff[k].signature, d.signoff[k].date])]);
 
   add("Summary", [["Summary for this Institution"],
-    ["Institution", i.name], ["Date of check", i.date], ["Type of check", i.type], ["Staff on nominal roll (entered)", i.roll], ["Staff on HR nominal roll", rollStaff ? rollStaff.length : ""], [],
+    ["Institution", i.name], ["School code", i.code], ["Date of check", i.date], ["Type of check", i.type], ["Total staff in the institute", i.roll], ["Staff on HR nominal roll", rollStaff ? rollStaff.length : ""], [],
     ["Staff listed on attendance sheet", s.listed], ["Present on time", s.onTime], ["Present but late", s.late],
     ["Absent with approval", s.approved], ["Absent without approval", s.absent], ["Signed register but not physically present", s.signedNotPresent],
     ["Attendance rate", pct(s.attendanceRate)], ["Punctuality rate", pct(s.punctualityRate)], [],
     ["Staff found out of office", s.movementListed], ["Not entered in movement book", s.notInBook], [],
+    ["Staff on leave recorded", lv.count], ["On leave on the day of the check", lv.ongoing], ["Total leave days", lv.totalDays],
+    ["On leave but signed or present on the attendance sheet", lv.signedWhileOnLeave], [],
     ["Records compliance rate", pct(s.complianceRate)], [],
     ["Level", "Listed", "Present", "Late", "Absent (no approval)", "Attendance rate"],
     ...s.byLevel.map(x => [x.level, x.listed, x.present, x.late, x.absent, pct(x.rate)])]);

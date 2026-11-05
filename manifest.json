@@ -1,8 +1,8 @@
 {
   "id": "./",
-  "name": "Staff Attendance & Movement Checks",
-  "short_name": "Attendance",
-  "description": "Record staff attendance, punctuality and movement checks at institutions, with an automatic summary and Excel export. Works offline.",
+  "name": "Monitoring Checks",
+  "short_name": "Monitoring",
+  "description": "Record Human Resource and EdTech monitoring checks at institutions, with an automatic summary and Excel export. Works offline.",
   "start_url": "./?source=pwa",
   "scope": "./",
   "display": "standalone",

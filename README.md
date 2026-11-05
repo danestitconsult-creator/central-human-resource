@@ -1,4 +1,4 @@
-# Staff Attendance & Movement Checks (Firebase + GitHub Pages)
+# Monitoring Checks (Firebase + GitHub Pages)
 
 A web version of the *Staff Attendance and Movement Checks* workbook. Monitors log in, record each institution check
 (Institution details, Attendance, Movement log, Records checklist, Findings, Summary), and the Summary is calculated live,
@@ -69,7 +69,7 @@ python3 -m http.server 8000     # then open http://localhost:8000
 | `js/evidence.js` | Shrinks photos and prepares evidence files for saving |
 | `tests/roll-core.test.mjs` | `node tests/roll-core.test.mjs` checks the matching logic |
 | `tests/edtech-calc.test.mjs` | `node tests/edtech-calc.test.mjs` checks the EdTech totals and flags |
-| `firestore.rules` | Security rules: owners full access, leads and HR read-only on all checks, the EdTech role read-only on EdTech checks, HR can add evidence and upload the roll |
+| `firestore.rules` | Security rules: owners full access, leads, HR and the Deputy Director read-only on all checks, the EdTech role read-only on EdTech checks, HR can add evidence and upload the roll |
 | `firebase.json` | Firebase Hosting + rules deployment config |
 | `.github/workflows/pages.yml` | Auto-deploy to GitHub Pages |
 
@@ -132,6 +132,18 @@ HR sees every monitor's checks (read-only, like a team lead) and can also **add 
 To make someone HR, follow the team lead steps above but set `role` to `hr`, then **publish the new `firestore.rules`** (it adds the `hr` role, the `roll` collection and the evidence rules).
 Monitors, leads and HR can all *read* the nominal roll; only HR can change it.
 
+## My profile and photo
+Everyone has a **My profile** page: click your photo (or initials) in the top bar. You can upload, change or remove your photo, and see your name, role and how many checks you have recorded. The photo is cropped to a square, shrunk to about 20 to 40 KB and saved on your own profile, so no Firebase Storage plan is needed. It shows in the top bar on every device you sign in on. Other people cannot see your photo (the rules only let you read your own profile).
+
+## School codes
+Every institution can have a **school code**. HR and team leads keep the list: on the **Nominal roll** page the institutions table has a *School code* column that they can edit, or they can type the code in the **School code** box on a check's Institution tab, which updates the list for everyone. When anyone chooses an institution on a check, its code is filled in automatically (monitors cannot change a listed code, but can type one for the check if the institution has none yet). The code is shown in the check's header, the Institution tab, the Summary and printout, the dashboard cards (and their search), the Excel export, and to everyone who opens the check read-only, including the head of the institution's checks that are shared with them, the Deputy Director, HR and team leads. The codes are stored in `config/schoolCodes`; **publish the updated `firestore.rules`** so HR and team leads can save them.
+
+## Deputy Director role (supervisory)
+The **Deputy Director** (`role` = `deputy`) can open **every monitoring record in every department**: all Human Resource and EdTech checks, with their evidence, from every monitor. The view is read-only. The Deputy Director opens on **All monitors** and can switch between the Human Resource and EdTech tabs. Set the role the same way as the team lead, and **publish the updated `firestore.rules`**.
+
+## Leave tab (Human Resource checks)
+The **Leave** tab records staff on leave at the institution: name, type of leave (annual, sick, maternity, paternity, study, casual or compassionate, other), the first and last day, and remarks. The app works out the **duration in days** (both days counted), the day the person is **due back**, and whether the person is on leave on the day of the check. If the HR nominal roll marks staff as on leave, one click adds them to the list. The Summary shows the number on leave, total and average days and the longest leave, and flags anyone **on leave who signed or is present on the attendance sheet**. The Excel export has a **Leave** sheet.
+
 ## EdTech role
 The **EdTech** role is for the EdTech department's own officers. They see only the **EdTech** tab (no Human Resource tab), can switch between **My checks** and **All monitors** to read every EdTech check (read-only), and can **add or remove evidence on any EdTech check**. They cannot open Human Resource checks. Team leads and HR still see both departments.
 To make someone an EdTech officer, follow the team lead steps above but set `role` to `edtech`, then **publish the new `firestore.rules`** (it adds the `edtech` role). Their own new checks are always EdTech checks.
@@ -187,7 +199,7 @@ firebase deploy --only hosting,firestore:rules
 
 ## Institution list, districts and categories
 - **Name of institution** is a dropdown, sorted A to Z, pre-filled with the 20 Central Region institutions. **+ Add** adds a new name (saved in capitals) and **Delete** removes the selected one from the list. The list is shared by all users and stored in Firestore at EdTech checks use `institution{}`, `tools[]` (first 3 rows fixed: item, quantity, distributed, stores, condition, remarks; max 20), `allocation[]` (type, staff, dept, quantity, condition, remarks; max 200), `findings[]`, `assessment{}` and `signoff{}` instead of the attendance fields.
-`config/institutions`. Deleting a name never deletes checks already recorded for it.
+`config/schoolCodes` (`codes`: institution name to school code), `config/institutions`. Deleting a name never deletes checks already recorded for it.
 - By default **any signed-in user** can add or delete institutions. To limit this to team leads, change `allow write: if signedIn();` to `allow write: if isLead();` in `firestore.rules` for `config/institutions`.
 - **Location / district** is a dropdown of the 22 Central Region assemblies (change it any time by picking another). The list is in `DISTRICTS` in `js/app.js`.
 - **Staff categories covered** is a dropdown where you tick one or more of: Principals, Regional Staff, Institute staff, NSS Personnels, Voluntary Staff (`STAFF_CATEGORIES` in `js/app.js`).
@@ -210,4 +222,4 @@ Checks saved before EdTech existed have no `department` field and are treated as
 `config/institutions`: `list[]` (shared institution names).
 `inspections/{id}/evidence/{evId}`: `kind` (`image` | `pdf`), `data` (the file as a data URL), `name`, `size`, `category`, `caption`, `uploadedBy`, `uploadedByName`, `uploadedAt`.
 `roll/{institutionKey}`: `institution`, `sheet`, `staff[]` (`no`, `name`, `job`, `post`), `count`, `onLeave`, `importedAt`, `importedBy`, `source`. The key is the institution name in capitals with spaces and punctuation removed.
-`users/{uid}`: `name`, `email`, `role` (`monitor` | `lead` | `hr` | `edtech`), `createdAt`.
+`users/{uid}`: `name`, `email`, `role` (`monitor` | `lead` | `hr` | `edtech` | `deputy`), `createdAt`.
