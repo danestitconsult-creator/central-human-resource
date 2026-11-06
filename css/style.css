@@ -554,3 +554,5 @@ a.avatar { text-decoration: none; }
 .profile-card .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
 .code-pill { align-self: center; background: var(--gold-tint, #fbf0d4); color: #7a5600; }
 .code-input { max-width: 150px; }
+.other-name { margin-top: 6px; min-width: 190px; }
+.grid-table tr.sub td { color: var(--muted, #5b6b73); font-size: 13px; }

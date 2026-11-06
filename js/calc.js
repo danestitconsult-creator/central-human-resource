@@ -30,18 +30,19 @@ export function computeSummary(d) {
   const absent = count("Absent");
   const approved = count("On leave") + count("On duty elsewhere");
   const listed = att.length;
+  const unmarked = listed - onTime - late - absent - approved;   // listed, but no attendance status chosen yet
 
-  const signedNotPresent = attAll.filter(r => r.signed === "Yes" && r.present === "No").length;
+  // Only rows with a name count, so a half-filled blank row cannot change the figures
+  const signedNotPresent = att.filter(r => r.signed === "Yes" && r.present === "No").length;
 
   const mov = (d.movement || []).filter(named);
-  const notInBook = (d.movement || []).filter(r => r.entered === "No").length;
+  const notInBook = mov.filter(r => r.entered === "No").length;
 
   const recs = d.records || [];
   const yes = recs.filter(r => r.response === "Yes").length;
   const no = recs.filter(r => r.response === "No").length;
 
-  const byLevel = LEVELS.map(level => {
-    const rows = att.filter(r => r.level === level);
+  const levelRow = (level, rows) => {
     const present = rows.filter(r => r.status === "On time" || r.status === "Late").length;
     return {
       level,
@@ -51,17 +52,19 @@ export function computeSummary(d) {
       absent: rows.filter(r => r.status === "Absent").length,
       rate: ratio(present, rows.length)
     };
-  });
+  };
+  const byLevel = LEVELS.map(level => levelRow(level, att.filter(r => r.level === level)));
+  const noLevel = levelRow("Level not selected", att.filter(r => !LEVELS.includes(r.level)));   // so the level table adds up to everyone listed
 
   return {
-    listed, onTime, late, absent, approved, signedNotPresent,
+    listed, onTime, late, absent, approved, unmarked, signedNotPresent,
     attendanceRate: ratio(onTime + late, listed),
     punctualityRate: ratio(onTime, onTime + late),
     movementListed: mov.length,
     notInBook,
     recordsYes: yes, recordsNo: no,
     complianceRate: ratio(yes, yes + no),
-    byLevel
+    byLevel, noLevel
   };
 }
 
